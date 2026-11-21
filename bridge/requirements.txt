@@ -1,0 +1,2 @@
+# sureflap_bridge.py and flapctl.py use Python 3.9+ standard library only.
+# No third-party packages are required.

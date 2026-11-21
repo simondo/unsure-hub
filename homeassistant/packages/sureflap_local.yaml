@@ -1,0 +1,51 @@
+# Drop into your Home Assistant `packages/` directory (or merge into configuration.yaml).
+# Implements "Onboard Curfew as Fallback + Home Assistant Control on Top":
+#   - Normal operation: the flap stays in `Curfew` mode (e.g. 18:30 -> 06:00),
+#     so it locks/unlocks reliably even if Wi-Fi or Home Assistant is down.
+#   - Manual override: switch `input_select.catflap_lock_mode` on your dashboard
+#     at any time (`Unlocked`, `Keep In`, `Keep Out`, `Locked`, `Curfew`).
+#   - Safety net: at curfew start (18:30) and morning (06:00), if the flap was
+#     temporarily overridden to `Unlocked`, HA returns it to `Curfew` mode.
+
+input_select:
+  catflap_lock_mode:
+    name: Cat Flap Lock Mode
+    icon: mdi:door-closed-lock
+    options:
+      - Unlocked
+      - Keep In
+      - Keep Out
+      - Locked
+      - Curfew
+
+automation:
+  - id: sureflap_return_to_curfew_evening
+    alias: "Cat Flap: Return to Curfew at 18:30 if left Unlocked"
+    description: "Safety net so a daytime/evening manual Unlock never leaves the flap open overnight."
+    trigger:
+      - platform: time
+        at: "18:30:00"
+    condition:
+      - condition: state
+        entity_id: input_select.catflap_lock_mode
+        state: "Unlocked"
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.catflap_lock_mode
+        data:
+          option: "Curfew"
+
+  - id: sureflap_battery_low_alert
+    alias: "Cat Flap: Low Battery Alert"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.catflap_battery
+        below: 4.9
+        for:
+          hours: 2
+    action:
+      - service: persistent_notification.create
+        data:
+          title: "Cat Flap Battery Low"
+          message: "Cat flap battery is {{ states('sensor.catflap_battery') }}V. Time to replace the 4x C-cell batteries."

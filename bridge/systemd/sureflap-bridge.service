@@ -1,0 +1,14 @@
+[Unit]
+Description=SureFlap ESP32-C5 Local Hub Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sureflap-esp32-hub/bridge
+ExecStart=/usr/bin/python3 -u /opt/sureflap-esp32-hub/bridge/sureflap_bridge.py -c /opt/sureflap-esp32-hub/bridge/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

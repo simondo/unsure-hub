@@ -1,0 +1,16 @@
+# Firmware build artifacts & secrets
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/main/secrets.h
+
+# Bridge runtime state, logs & config
+bridge/config.json
+bridge/state.json
+bridge/*.pcap
+bridge/*.log
+bridge/__pycache__/
+*.pyc
+.DS_Store

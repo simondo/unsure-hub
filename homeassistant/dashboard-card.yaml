@@ -1,0 +1,29 @@
+# Example Lovelace dashboard section for Home Assistant.
+# Replace `catone` / `cattwo` with the pet names configured in bridge/config.json.
+type: grid
+columns: 2
+square: false
+cards:
+  - type: tile
+    entity: sensor.catflap_catone
+    name: Cat One
+  - type: tile
+    entity: sensor.catflap_cattwo
+    name: Cat Two
+  - type: tile
+    entity: input_select.catflap_lock_mode
+    name: Set Lock Mode
+    features:
+      - type: select-options
+  - type: tile
+    entity: sensor.catflap_lock_mode
+    name: Flap Lock State
+  - type: tile
+    entity: sensor.catflap_curfew
+    name: Curfew
+  - type: tile
+    entity: sensor.catflap_battery
+    name: Flap Battery
+  - type: tile
+    entity: sensor.catflap_last_event
+    name: Last Event

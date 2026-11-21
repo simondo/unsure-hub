@@ -1,0 +1,13 @@
+services:
+  sureflap-bridge:
+    build: .
+    container_name: sureflap-bridge
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Europe/London
+      - SUREFLAP_CONFIG=/data/config.json
+      # Optional: pass HA token via env instead of config.json
+      # - HASS_TOKEN=your_long_lived_token

@@ -1,0 +1,26 @@
+{
+  "esp32_ip": "192.168.1.50",
+  "esp32_ctrl_port": 17755,
+  "zep_listen_port": 17754,
+  "stat_listen_port": 17756,
+  "state_file": "./state.json",
+  "log_file": "./hub.log",
+  "pcap_file": "",
+  "ota_enabled": false,
+  "ota_port": 8000,
+  "ota_dir": "./ota",
+  "home_assistant": {
+    "url": "http://homeassistant.local:8123",
+    "token": "REPLACE_WITH_LONG_LIVED_ACCESS_TOKEN",
+    "lock_input_select": "input_select.catflap_lock_mode",
+    "poll_interval_sec": 2.0
+  },
+  "pets": {
+    "1": "CatOne",
+    "2": "CatTwo"
+  },
+  "curfew_fallback": {
+    "lock_time": "18:30",
+    "unlock_time": "06:00"
+  }
+}
