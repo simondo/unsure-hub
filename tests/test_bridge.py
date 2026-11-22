@@ -402,6 +402,18 @@ class TestProtocolDecoding(BridgeTestBase):
         self.assertTrue(any(t.endswith("/command_failed") for t, _, _ in published))
         self.assertIn(("sureflap/lock_mode/state", "Curfew", True), published)
 
+        # 3) Flap reports a DIFFERENT mode than requested -> fails with mismatch instead of "confirmed"
+        published.clear()
+        with patch("sureflap_bridge.time.time", return_value=2000.0):
+            bridge._set_lock_from_ha("Keep In")
+            raw_unlocked = encrypt_frame(TEST_HDR, make_12b_reg36(0), TEST_KEY)
+            bridge.handle_stat_line(stat_line(raw_unlocked))
+        self.assertEqual(bridge.state["lock_mode"], "Unlocked")
+        self.assertEqual(bridge.cmd_status, "failed: flap reported Unlocked instead of Keep In")
+        self.assertIsNone(bridge.pending_cmd_target)
+        self.assertTrue(any(t.endswith("/command_failed") for t, _, _ in published))
+        self.assertIn(("sureflap/lock_mode/state", "Unlocked", True), published)
+
 
 class TestPetStateMachine(BridgeTestBase):
     def _send_pet_event(self, bridge, t_str, slot, dir_byte, now_ts):

@@ -755,11 +755,14 @@ class SureFlapBridge:
             if code in LOCK_MODES:
                 mode = LOCK_MODES[code]
                 self.state["lock_mode"] = mode
+                self._save_state()
+                self.log(f"LOCK MODE -> {mode} (code {code})")
+                if self.pending_cmd_target and mode != self.pending_cmd_target:
+                    self._fail_lock_cmd(f"flap reported {mode} instead of {self.pending_cmd_target}")
+                    return
                 self.pending_cmd_target = None
                 self.pending_cmd_deadline = 0.0
                 self.cmd_status = "confirmed"
-                self._save_state()
-                self.log(f"LOCK MODE -> {mode} (code {code})")
                 self.push_lock_sensor()
                 self.sync_ha_select(mode)
             return
