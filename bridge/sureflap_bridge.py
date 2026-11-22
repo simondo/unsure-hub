@@ -359,8 +359,8 @@ class SureFlapBridge:
         if not self.esp_ip:
             self._fail_lock_cmd("ESP32 not connected", target=target)
             return
-        if self.active_hdr and not self.key_verified.get(self.active_hdr) and not self.allow_unverified_key:
-            self._fail_lock_cmd("session key not verified yet", target=target)
+        if not self.allow_unverified_key and (not self.active_hdr or not self.key_verified.get(self.active_hdr)):
+            self._fail_lock_cmd("waiting for key verification", target=target)
             return
         self.pending_cmd_target = target
         self.pending_cmd_deadline = time.time() + self.cmd_timeout_sec
@@ -704,6 +704,10 @@ class SureFlapBridge:
             if self.state.get("esp_fw_ver") != ver:
                 self.state["esp_fw_ver"] = ver
                 self._save_state()
+            return
+        if "HUB boot-reset-reason " in line or ("HUB key " in line and "valid=0" in line):
+            if self.active_hdr:
+                self.push_key_to_esp(self.active_hdr)
             return
         if "txcmd-ack" in line:
             self.cmd_status = "acked"

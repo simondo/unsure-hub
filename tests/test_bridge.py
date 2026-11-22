@@ -263,6 +263,30 @@ class TestKeystreamAutoLearning(BridgeTestBase):
         self.assertEqual(bridge.sessions[TEST_HDR][10], TEST_KEY[10])
         self.assertFalse(bridge.key_verified.get(TEST_HDR))
 
+    def test_resyncs_verified_key_after_esp_reboot_and_blocks_unverified_writes(self):
+        bridge = self.make_bridge(preload_key=False)
+        # Unverified / no session: lock command must be refused without sending UDP
+        bridge._set_lock_from_ha("Keep In")
+        self.assertIn("waiting for key verification", bridge.cmd_status)
+        self.assertEqual(bridge.sent_udp, [])
+
+        # Once verified, ESP32 reboot ("boot-reset-reason" or "key ... valid=0") re-pushes setkey
+        bridge.sessions[TEST_HDR] = dict(TEST_KEY)
+        bridge.chk12[TEST_HDR] = 0x64
+        bridge.key_verified[TEST_HDR] = True
+        bridge.active_hdr = TEST_HDR
+
+        bridge.handle_stat_line("HUB boot-reset-reason 03")
+        bridge.handle_stat_line("HUB key hdr=a1b2 k4..11=0000000000000000 chk12=00 valid=0 pend=0")
+        expected_khex = bytes(TEST_KEY[i] for i in range(4, 12)).hex()
+        self.assertEqual(
+            bridge.sent_udp,
+            [
+                f"setkey {TEST_HDR} {expected_khex} 64",
+                f"setkey {TEST_HDR} {expected_khex} 64",
+            ],
+        )
+
 
 class TestProtocolDecoding(BridgeTestBase):
     def test_reg36_lock_mode_and_5s_dedup(self):

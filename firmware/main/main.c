@@ -658,9 +658,9 @@ static int queue_writereg1(uint16_t reg, uint8_t val, uint8_t op, int retries)
 {
     uint8_t pkt[12];
     taskENTER_CRITICAL(&cmd_mux);
-    if (!sess_valid && sess_hdr[0] == 0 && sess_hdr[1] == 0) {
+    if (!sess_valid) {
         taskEXIT_CRITICAL(&cmd_mux);
-        hub_log_str("cmd-err ", "session key not set yet (run setkey or wait for bridge)");
+        hub_log_str("cmd-err ", "session key not verified/set yet (waiting for bridge setkey)");
         return -1;
     }
     pkt[0]  = 0x01;
