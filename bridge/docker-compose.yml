@@ -10,9 +10,11 @@ services:
       - ./data:/data
     environment:
       - TZ=Europe/London
-      # Option A: mount /data/config.json (see config.example.json)
       - SUREFLAP_CONFIG=/data/config.json
-      # Option B: configure purely via env vars (no config.json required):
+      - STATE_FILE=/data/state.json
+      - OTA_DIR=/data/ota
+      - OTA_ENABLED=true
+      # Optional: configure purely via env vars (no config.json required; ESP32_IP is auto-discovered):
       # - ESP32_IP=192.168.1.50
       # - MQTT_HOST=127.0.0.1
       # - MQTT_PORT=1883
@@ -20,7 +22,6 @@ services:
       # - TOGGLE_ON_IN=true
       # - CURFEW_LOCK=18:30
       # - CURFEW_UNLOCK=06:00
-      # - OTA_ENABLED=true
 
   # Optional on-demand ESP-IDF v5.5.6 builder (only needed if you edit firmware/main/main.c):
   #   docker compose --profile build run --rm firmware-builder

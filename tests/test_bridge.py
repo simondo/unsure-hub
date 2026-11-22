@@ -440,10 +440,21 @@ class TestMqttAndConfig(BridgeTestBase):
         self.assertTrue(cfg["ota_enabled"])
         self.assertEqual(cfg["curfew_fallback"], {"lock_time": "19:00", "unlock_time": "07:00"})
 
-    def test_load_config_missing_esp32_ip_exits(self):
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(SystemExit):
-                sb._load_config("/nonexistent/config.json")
+    def test_load_config_starts_without_esp32_ip_and_auto_discovers(self):
+        with patch.dict(os.environ, {"OTA_ENABLED": "true", "STATE_FILE": self.state_file}, clear=True):
+            cfg = sb._load_config("/nonexistent/config.json")
+        self.assertNotIn("esp32_ip", cfg)
+        bridge = sb.SureFlapBridge(cfg)
+        self.addCleanup(bridge.udp_tx.close)
+        self.assertEqual(bridge.esp_ip, "")
+        # Calling send_esp before discovery must not raise
+        bridge.send_esp("getkey")
+
+        # Auto-discovery from incoming UDP source IP persists to state.json
+        bridge.note_esp_ip("192.0.2.77")
+        self.assertEqual(bridge.esp_ip, "192.0.2.77")
+        with open(self.state_file) as f:
+            self.assertEqual(json.load(f)["esp32_ip"], "192.0.2.77")
 
 
 class TestWebFlasherAndOtaServer(BridgeTestBase):

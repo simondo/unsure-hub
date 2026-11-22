@@ -101,6 +101,8 @@ static void cfg_save(void)
     nvs_close(h);
 }
 
+static void sanitize_cfg(void);
+
 static void cfg_load(void)
 {
     memset(&g_cfg, 0, sizeof g_cfg);
@@ -136,17 +138,38 @@ static void cfg_load(void)
         l = 8; nvs_get_blob(h, "mac", g_cfg.hub_mac, &l);
         nvs_close(h);
     }
+    sanitize_cfg();
+}
+
+static void sanitize_cfg(void)
+{
+    // Trim leading/trailing whitespace on sink_ip and country
+    char *s = g_cfg.sink_ip;
+    while (*s == ' ' || *s == '\t') s++;
+    if (s != g_cfg.sink_ip) memmove(g_cfg.sink_ip, s, strlen(s) + 1);
+    size_t n = strlen(g_cfg.sink_ip);
+    while (n > 0 && (g_cfg.sink_ip[n - 1] == ' ' || g_cfg.sink_ip[n - 1] == '\t')) g_cfg.sink_ip[--n] = '\0';
+
+    // Uppercase 2-letter ISO country code; default to GB if invalid
+    if (isalpha((unsigned char)g_cfg.country[0]) && isalpha((unsigned char)g_cfg.country[1])) {
+        g_cfg.country[0] = (char)toupper((unsigned char)g_cfg.country[0]);
+        g_cfg.country[1] = (char)toupper((unsigned char)g_cfg.country[1]);
+        g_cfg.country[2] = '\0';
+        if (!strcmp(g_cfg.country, "UK")) strcpy(g_cfg.country, "GB");
+    } else {
+        strcpy(g_cfg.country, "GB");
+    }
     if (!g_cfg.wifi2_ssid[0]) {
         strncpy(g_cfg.wifi2_ssid, g_cfg.wifi5_ssid, sizeof(g_cfg.wifi2_ssid) - 1);
         strncpy(g_cfg.wifi2_pass, g_cfg.wifi5_pass, sizeof(g_cfg.wifi2_pass) - 1);
     }
-    if (!g_cfg.country[0]) strncpy(g_cfg.country, "GB", sizeof(g_cfg.country) - 1);
     if (!g_cfg.ota_port) g_cfg.ota_port = 8000;
 }
 
 static bool cfg_is_ready(void)
 {
-    return g_cfg.wifi5_ssid[0] != '\0' && g_cfg.sink_ip[0] != '\0';
+    struct in_addr tmp;
+    return g_cfg.wifi5_ssid[0] != '\0' && inet_pton(AF_INET, g_cfg.sink_ip, &tmp) == 1;
 }
 
 static void url_decode(const char *src, char *dst, size_t max_len)
@@ -185,9 +208,9 @@ static bool form_get(const char *body, const char *key, char *out, size_t max_le
     return false;
 }
 
-static void run_setup_portal(void)
+static void run_setup_portal(int timeout_sec)
 {
-    ESP_LOGW(TAG, "No Wi-Fi/bridge config found — starting SoftAP 'SureFlap-Hub-Setup' on http://192.168.4.1/");
+    ESP_LOGW(TAG, "Starting SoftAP 'SureFlap-Hub-Setup' on http://192.168.4.1/ (timeout=%ds)", timeout_sec);
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_ap();
@@ -206,6 +229,8 @@ static void run_setup_portal(void)
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
+    struct timeval stv = { .tv_sec = 5 };
+    setsockopt(srv, SOL_SOCKET, SO_RCVTIMEO, &stv, sizeof stv);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80), .sin_addr.s_addr = htonl(INADDR_ANY) };
     bind(srv, (struct sockaddr *)&a, sizeof a);
     listen(srv, 4);
@@ -224,43 +249,76 @@ static void run_setup_portal(void)
         "<label>Primary Wi-Fi Password</label><input name=w5p type=password>"
         "<label>2.4 GHz Fallback SSID (optional)</label><input name=w2s>"
         "<label>2.4 GHz Fallback Password (optional)</label><input name=w2p type=password>"
-        "<label>Bridge / Docker Server IP (e.g. 192.168.1.50)</label><input name=sink required>"
-        "<label>Wi-Fi Country Code</label><input name=cc value=GB maxlength=2>"
+        "<label>Bridge / Docker Server IPv4 (e.g. 192.168.1.50)</label><input name=sink required>"
+        "<label>Wi-Fi Country Code (2-letter ISO, e.g. GB, US, DE)</label><input name=cc value=GB maxlength=2>"
         "<button type=submit>Save &amp; Reboot</button></form></body></html>";
 
-    static char req[1536];
+    static char req[2560];
+    int64_t deadline = timeout_sec > 0 ? esp_timer_get_time() + (int64_t)timeout_sec * 1000000LL : 0;
     for (;;) {
+        if (deadline > 0 && esp_timer_get_time() >= deadline) {
+            ESP_LOGW(TAG, "Setup portal fallback timeout reached — rebooting to retry Wi-Fi");
+            esp_restart();
+        }
         int c = accept(srv, NULL, NULL);
-        if (c < 0) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+        if (c < 0) continue;
         struct timeval tv = { .tv_sec = 3 };
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        int n = recv(c, req, sizeof(req) - 1, 0);
-        if (n > 0) {
-            req[n] = '\0';
-            if (!strncmp(req, "POST /save", 10)) {
-                char *body = strstr(req, "\r\n\r\n");
+
+        // Read full HTTP headers + POST body across multiple TCP segments
+        int total_n = 0;
+        char *body = NULL;
+        int content_len = 0;
+        while (total_n < (int)sizeof(req) - 1) {
+            int n = recv(c, req + total_n, sizeof(req) - 1 - total_n, 0);
+            if (n <= 0) break;
+            total_n += n;
+            req[total_n] = '\0';
+            if (!body) {
+                body = strstr(req, "\r\n\r\n");
                 if (body) {
                     body += 4;
-                    form_get(body, "w5s", g_cfg.wifi5_ssid, sizeof g_cfg.wifi5_ssid);
-                    form_get(body, "w5p", g_cfg.wifi5_pass, sizeof g_cfg.wifi5_pass);
-                    form_get(body, "w2s", g_cfg.wifi2_ssid, sizeof g_cfg.wifi2_ssid);
-                    form_get(body, "w2p", g_cfg.wifi2_pass, sizeof g_cfg.wifi2_pass);
-                    form_get(body, "sink", g_cfg.sink_ip, sizeof g_cfg.sink_ip);
-                    form_get(body, "cc", g_cfg.country, sizeof g_cfg.country);
-                    if (!g_cfg.wifi2_ssid[0]) {
-                        strncpy(g_cfg.wifi2_ssid, g_cfg.wifi5_ssid, sizeof(g_cfg.wifi2_ssid) - 1);
-                        strncpy(g_cfg.wifi2_pass, g_cfg.wifi5_pass, sizeof(g_cfg.wifi2_pass) - 1);
+                    const char *cl = req;
+                    while (cl < body) {
+                        if (!strncasecmp(cl, "Content-Length:", 15)) {
+                            content_len = atoi(cl + 15);
+                            break;
+                        }
+                        cl = strchr(cl, '\n');
+                        if (!cl) break;
+                        cl++;
                     }
-                    if (cfg_is_ready()) {
-                        cfg_save();
-                        const char *ok = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-                                         "<html><body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:24px'>"
-                                         "<h2>Saved!</h2><p>Rebooting into SureFlap Hub mode...</p></body></html>";
-                        send(c, ok, strlen(ok), 0);
-                        close(c);
-                        vTaskDelay(pdMS_TO_TICKS(1000));
-                        esp_restart();
-                    }
+                }
+            }
+            if (body && (total_n - (int)(body - req)) >= content_len) break;
+        }
+
+        if (total_n > 0) {
+            if (!strncmp(req, "POST /save", 10) && body) {
+                form_get(body, "w5s", g_cfg.wifi5_ssid, sizeof g_cfg.wifi5_ssid);
+                form_get(body, "w5p", g_cfg.wifi5_pass, sizeof g_cfg.wifi5_pass);
+                form_get(body, "w2s", g_cfg.wifi2_ssid, sizeof g_cfg.wifi2_ssid);
+                form_get(body, "w2p", g_cfg.wifi2_pass, sizeof g_cfg.wifi2_pass);
+                form_get(body, "sink", g_cfg.sink_ip, sizeof g_cfg.sink_ip);
+                form_get(body, "cc", g_cfg.country, sizeof g_cfg.country);
+                sanitize_cfg();
+                if (cfg_is_ready()) {
+                    cfg_save();
+                    const char *ok = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                                     "<html><body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:24px'>"
+                                     "<h2>Saved!</h2><p>Rebooting into SureFlap Hub mode...</p></body></html>";
+                    send(c, ok, strlen(ok), 0);
+                    close(c);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    esp_restart();
+                } else {
+                    const char *err = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                                      "<html><body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:24px'>"
+                                      "<h2>Invalid Settings</h2><p>Please enter a Wi-Fi SSID and a valid IPv4 address (e.g. 192.168.1.50).</p>"
+                                      "<p><a href='/' style='color:#58a6ff'>Go back</a></p></body></html>";
+                    send(c, err, strlen(err), 0);
+                    close(c);
+                    continue;
                 }
             }
             send(c, HTML_PAGE, strlen(HTML_PAGE), 0);
@@ -514,13 +572,16 @@ static void wifi_start(void)
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_country_code(g_cfg.country, true));
+    if (esp_wifi_set_country_code(g_cfg.country, true) != ESP_OK) {
+        ESP_LOGW(TAG, "Invalid Wi-Fi country '%s', falling back to GB", g_cfg.country);
+        esp_wifi_set_country_code("GB", true);
+    }
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_ev, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ev, NULL));
     wifi_config_t wc = { 0 };
     strncpy((char *)wc.sta.ssid, use5g ? g_cfg.wifi5_ssid : g_cfg.wifi2_ssid, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, use5g ? g_cfg.wifi5_pass : g_cfg.wifi2_pass, sizeof(wc.sta.password) - 1);
-    wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wc.sta.threshold.authmode = wc.sta.password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
@@ -889,16 +950,25 @@ static int ver_cb(const char *p, int n, void *ctx)
     return 0;
 }
 
-static void ota_pull(const char *host, int port, const char *path)
+static void ota_pull(const char *host, int port, const char *path, bool skip_if_same_ver)
 {
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     esp_ota_handle_t h = 0;
     if (!part || esp_ota_begin(part, OTA_SIZE_UNKNOWN, &h) != ESP_OK) return;
     int got = http_get(host, port, path, ota_write_cb, &h);
     ESP_LOGW(TAG, "OTA got %d bytes", got);
-    if (got > 100000 && esp_ota_end(h) == ESP_OK && esp_ota_set_boot_partition(part) == ESP_OK) {
-        ESP_LOGW(TAG, "OTA ok, restarting");
-        esp_restart();
+    if (got > 100000 && esp_ota_end(h) == ESP_OK) {
+        esp_app_desc_t new_desc;
+        if (skip_if_same_ver && esp_ota_get_partition_description(part, &new_desc) == ESP_OK &&
+            strcmp(new_desc.version, esp_app_get_description()->version) == 0) {
+            ESP_LOGW(TAG, "OTA image version '%s' matches running app — skipping reboot to prevent loop", new_desc.version);
+            return;
+        }
+        if (esp_ota_set_boot_partition(part) == ESP_OK) {
+            ESP_LOGW(TAG, "OTA ok, restarting");
+            esp_restart();
+        }
+        return;
     }
     esp_ota_abort(h);
 }
@@ -907,7 +977,7 @@ static void ota_task(void *a)
 {
     char *url = a, host[16], path[64];
     int port = 0;
-    if (sscanf(url, "http://%15[^:]:%d%63s", host, &port, path) == 3) ota_pull(host, port, path);
+    if (sscanf(url, "http://%15[^:]:%d%63s", host, &port, path) == 3) ota_pull(host, port, path, false);
     free(url);
     vTaskDelete(NULL);
 }
@@ -921,7 +991,7 @@ static void boot_ota_check(void)
     }
     const char *mine = esp_app_get_description()->version;
     hub_log_str(n > 0 ? (strcmp(v, mine) ? "ota-newer " : "ota-current ") : "ota-nocontact ", mine);
-    if (n > 0 && strcmp(v, mine)) ota_pull(g_cfg.sink_ip, g_cfg.ota_port, "/sureflap_hub.bin");
+    if (n > 0 && strcmp(v, mine)) ota_pull(g_cfg.sink_ip, g_cfg.ota_port, "/sureflap_hub.bin", true);
 }
 
 static void ctrl_task(void *a)
@@ -1109,7 +1179,7 @@ static void wd_task(void *a)
         if (up == 20) { esp_ota_mark_app_valid_cancel_rollback(); fail5 = 0; }
         if (down >= (use5g ? 90 : 180)) {
             crumb[3] = 1;
-            if (use5g && fail5 < 250) fail5++;
+            if (fail5 < 250) fail5++;
             esp_restart();
         }
     }
@@ -1140,7 +1210,13 @@ void app_main(void)
     cfg_load();
     memcpy(hub_mac, g_cfg.hub_mac, 8);
     if (!cfg_is_ready()) {
-        run_setup_portal();
+        run_setup_portal(0);
+    }
+    // Recovery guard: after 2x 5 GHz + 1x 2.4 GHz failed boot cycles, open setup portal for 5 min
+    // so mistyped Wi-Fi credentials can be fixed without USB, while still auto-retrying after outages.
+    if (fail5 >= 3) {
+        fail5 = 0;
+        run_setup_portal(300);
     }
 
     q = xQueueCreate(64, sizeof(rxf_t));

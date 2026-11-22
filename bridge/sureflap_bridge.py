@@ -22,6 +22,7 @@ Python 3.9+ stdlib only (optional `paho-mqtt` for MQTT Auto-Discovery).
 """
 
 import argparse
+import html
 import http.server
 import json
 import os
@@ -47,7 +48,7 @@ CURFEW_STATES = {1: "off", 2: "on", 3: "paused"}
 class SureFlapBridge:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.esp_ip = cfg["esp32_ip"]
+        self.esp_ip = cfg.get("esp32_ip", "")
         self.esp_port = int(cfg.get("esp32_ctrl_port", 17755))
         self.zep_port = int(cfg.get("zep_listen_port", 17754))
         self.stat_port = int(cfg.get("stat_listen_port", 17756))
@@ -78,6 +79,8 @@ class SureFlapBridge:
         self.fallback_unlock = cf.get("unlock_time", "06:00")
 
         self.state = self._load_state()
+        if not self.esp_ip and self.state.get("esp32_ip"):
+            self.esp_ip = self.state["esp32_ip"]
         self.sessions: Dict[str, Dict[int, int]] = {
             h: {int(i): v for i, v in kd.items()}
             for h, kd in self.state.get("sessions", {}).items()
@@ -142,8 +145,21 @@ class SureFlapBridge:
             self.log_fp.write(line + "\n")
 
     def send_esp(self, cmd: str) -> None:
+        if not self.esp_ip:
+            self.log(f"UDP skipped (ESP32 IP not configured/discovered yet): {cmd}")
+            return
         self.udp_tx.sendto(cmd.encode(), (self.esp_ip, self.esp_port))
         self.log(f"UDP -> {cmd}")
+
+    def note_esp_ip(self, src_ip: str) -> None:
+        if not src_ip or self.esp_ip:
+            return
+        self.esp_ip = src_ip
+        self.state["esp32_ip"] = src_ip
+        self._save_state()
+        self.log(f"Auto-discovered ESP32-C5 IP: {src_ip}")
+        if self.active_hdr:
+            self.push_key_to_esp(self.active_hdr)
 
     def push_key_to_esp(self, hdr: str) -> None:
         k = self.sessions.get(hdr, {})
@@ -728,15 +744,19 @@ class SureFlapBridge:
             def do_GET(self):
                 path = self.path.split("?")[0]
                 if path in ("/", "/index.html"):
-                    ver = fw_version()
+                    ver = html.escape(fw_version())
                     has_merged = find_fw("sureflap_hub_merged.bin") is not None
                     has_ota = (find_fw("sureflap_hub.bin") or find_fw("c5_sniffer.bin")) is not None
                     pets_html = "".join(
-                        f"<li><b>{p}</b>: {bridge.state.get('location', {}).get(p, 'unknown')}</li>"
+                        f"<li><b>{html.escape(p)}</b>: {html.escape(str(bridge.state.get('location', {}).get(p, 'unknown')))}</li>"
                         for p in bridge.pets.values()
                     ) or "<li>None configured</li>"
                     batt = bridge.state.get("battery") or {}
                     batt_str = f"{batt.get('volts', '?')} V ({batt.get('pct', '?')}%)" if batt else "waiting..."
+                    esp_ip_esc = html.escape(bridge.esp_ip or "waiting for ESP32...")
+                    hdr_esc = html.escape(bridge.active_hdr or "learning...")
+                    lock_esc = html.escape(str(bridge.state.get("lock_mode", "Unknown")))
+                    curf_esc = html.escape(str(bridge.state.get("flap_curfew", "unknown")))
                     flash_block = (
                         "<p>Plug an <b>ESP32-C5</b> into this computer via USB and click install (Chrome/Edge over localhost or HTTPS):</p>"
                         "<esp-web-install-button manifest='/manifest.json'>"
@@ -748,11 +768,11 @@ class SureFlapBridge:
                         else "<p class='muted'>No pre-built merged binary found in <code>/app/firmware</code> or <code>/data/ota</code> yet. Build via <code>docker compose --profile build run --rm firmware-builder</code>.</p>"
                     )
                     ota_btn = (
-                        "<form method='POST' action='/api/ota'><button class='btn'>Trigger Wireless OTA on ESP32 (" + bridge.esp_ip + ")</button></form>"
-                        if has_ota
-                        else "<p class='muted'>No OTA binary available.</p>"
+                        "<form method='POST' action='/api/ota'><button class='btn'>Trigger Wireless OTA on ESP32 (" + esp_ip_esc + ")</button></form>"
+                        if (has_ota and bridge.esp_ip)
+                        else "<p class='muted'>" + ("Waiting for ESP32-C5 to connect before OTA can be triggered." if has_ota else "No OTA binary available.") + "</p>"
                     )
-                    html = f"""<!doctype html><html><head><meta charset='utf-8'>
+                    page_html = f"""<!doctype html><html><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>SureFlap ESP32-C5 Local Hub</title>
 <script type='module' src='https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module'></script>
@@ -766,8 +786,8 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
 </style></head><body>
 <h1>SureFlap ESP32-C5 Local Hub</h1>
 <div class='card'><h2>Live Status</h2><ul>
-<li><b>ESP32-C5 IP:</b> <code>{bridge.esp_ip}</code> · <b>Session:</b> <code>{bridge.active_hdr or 'learning...'}</code></li>
-<li><b>Lock mode:</b> {bridge.state.get('lock_mode', 'Unknown')} · <b>Curfew:</b> {bridge.state.get('flap_curfew', 'unknown')}</li>
+<li><b>ESP32-C5 IP:</b> <code>{esp_ip_esc}</code> · <b>Session:</b> <code>{hdr_esc}</code></li>
+<li><b>Lock mode:</b> {lock_esc} · <b>Curfew:</b> {curf_esc}</li>
 <li><b>Battery:</b> {batt_str}</li>
 {pets_html}
 </ul></div>
@@ -775,7 +795,7 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
 <p class='muted'>After flashing, connect to Wi-Fi AP <b>SureFlap-Hub-Setup</b> and open <code>http://192.168.4.1</code> to enter your Wi-Fi and this server's IP.</p></div>
 <div class='card'><h2>Wireless OTA (version <code>{ver}</code>)</h2>{ota_btn}</div>
 </body></html>"""
-                    self._send_bytes(200, "text/html; charset=utf-8", html.encode())
+                    self._send_bytes(200, "text/html; charset=utf-8", page_html.encode())
                     return
 
                 if path == "/manifest.json":
@@ -839,8 +859,11 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
         s_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s_sock.bind(("0.0.0.0", self.stat_port))
 
-        self.log(f"Bridge listening on UDP {self.zep_port} (ZEP) and {self.stat_port} (status) -> ESP32 {self.esp_ip}:{self.esp_port}")
-        if self.active_hdr:
+        self.log(
+            f"Bridge listening on UDP {self.zep_port} (ZEP) and {self.stat_port} (status) -> ESP32 "
+            f"{self.esp_ip or '(auto-discover)'}:{self.esp_port}"
+        )
+        if self.active_hdr and self.esp_ip:
             self.push_key_to_esp(self.active_hdr)
 
         last_poll = 0.0
@@ -848,8 +871,9 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
         while True:
             rlist, _, _ = select.select([z_sock, s_sock], [], [], 0.5)
             for sock in rlist:
-                data, _ = sock.recvfrom(4096)
+                data, addr = sock.recvfrom(4096)
                 if sock is s_sock:
+                    self.note_esp_ip(addr[0])
                     self.handle_stat_line(data.decode("utf-8", errors="replace").strip())
                 elif self.pcap_fp and len(data) > 32 and data[:2] == b"EX":
                     frame = data[32 : 32 + data[31]]
@@ -907,8 +931,8 @@ def _load_config(path: str) -> dict:
             mq["username"] = os.environ["MQTT_USER"]
     if os.environ.get("OTA_ENABLED"):
         cfg["ota_enabled"] = os.environ["OTA_ENABLED"].lower() in ("1", "true", "yes")
-    if not cfg.get("esp32_ip"):
-        raise SystemExit("Config error: set esp32_ip in config.json or ESP32_IP env var")
+    if os.environ.get("OTA_DIR"):
+        cfg["ota_dir"] = os.environ["OTA_DIR"]
     return cfg
 
 
