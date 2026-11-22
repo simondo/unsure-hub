@@ -5,20 +5,21 @@ A **$7, 100% local replacement for the SureFlap / Sure Petcare Connect Hub** bui
 No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions — just direct 802.15.4 / MiWi communication between your ESP32-C5 and your SureFlap Microchip Pet Door / Cat Flap Connect.
 
 ```
-┌──────────────────────┐   802.15.4 Ch 15 (PAN 0x3421)   ┌────────────────────┐   UDP (5 GHz Wi-Fi)   ┌──────────────────────┐   REST API   ┌────────────────┐
-│ SureFlap Pet Door /  │ ◄─────────────────────────────► │   ESP32-C5 Board   │ ◄───────────────────► │  sureflap_bridge.py  │ ◄──────────► │ Home Assistant │
-│ Cat Flap Connect     │   5.56s sync + 0x09 cmd window  │  (ESP-IDF v5.5+)   │  17754/17755/17756    │  (Docker / Python)   │              │  Dashboard     │
-└──────────────────────┘                                 └────────────────────┘                       └──────────────────────┘              └────────────────┘
+┌──────────────────────┐   802.15.4 Ch 15 (PAN 0x3421)   ┌────────────────────┐   UDP (5 GHz Wi-Fi)   ┌──────────────────────┐   MQTT Discovery   ┌────────────────┐
+│ SureFlap Pet Door /  │ ◄─────────────────────────────► │   ESP32-C5 Board   │ ◄───────────────────► │  sureflap_bridge.py  │ ◄────────────────► │ Home Assistant │
+│ Cat Flap Connect     │   5.56s sync + 0x09 cmd window  │  (ESP-IDF v5.5+)   │  17754/17755/17756    │  (Docker / Python)   │   (or REST API)    │  Dashboard     │
+└──────────────────────┘                                 └────────────────────┘                       └──────────────────────┘                    └────────────────┘
 ```
 
 ## Features
 
 * **Full two-way local control:** Set lock mode (**Unlocked**, **Keep In**, **Keep Out**, **Locked**, **Curfew**) directly from Home Assistant or the CLI.
+* **Native Home Assistant MQTT Auto-Discovery:** Point the Docker container at your MQTT broker — zero HA tokens or YAML helpers needed. Automatically creates a **SureFlap Cat Flap** device with per-pet sensors, battery, curfew, lock-mode `select`, and 1-tap manual in/out Flip buttons (REST API fallback also supported).
 * **Onboard curfew programming + clock sync:** Write curfew lock/unlock times directly to the flap's registers (`519–523`) so the flap enforces curfew autonomously even if Wi-Fi or Home Assistant goes down, while still allowing instant HA overrides on top.
-* **Real-time pet tracking & telemetry:** Per-pet inside/outside state, last event, battery voltage/percentage, flap clock, and curfew state published to Home Assistant.
+* **Real-time pet tracking & telemetry:** Per-pet inside/outside state (including optional `toggle_on_in` mode for Pet Door Connect units that send `0x61` for both entries and normal-speed exits), `0x40` peek (`looked in`) decoding, last event, battery voltage/percentage, flap clock, and curfew state.
 * **5 GHz Wi-Fi + 2.4 GHz 802.15.4:** Uses the ESP32-C5's 5 GHz Wi-Fi radio so Wi-Fi traffic never contends with the 2.4 GHz 802.15.4 radio (with automatic fallback to 2.4 GHz + timed 5.56 s RX windows).
 * **Auto-learning session keystream:** Automatically recovers the flap's per-session XOR keystream on pair/re-pair and syncs it to the ESP32 via UDP.
-* **Built-in HTTP OTA + Wireshark ZEP v2 stream:** Update firmware wirelessly over HTTP and inspect live 802.15.4 frames in Wireshark on `udp.port == 17754`.
+* **Multi-arch Docker + Built-in HTTP OTA + Wireshark ZEP v2 stream:** Runs on `linux/amd64`, `linux/arm64`, and `linux/arm/v7`, updates ESP32 firmware wirelessly over HTTP, and streams live 802.15.4 frames to Wireshark on `udp.port == 17754`.
 
 ---
 

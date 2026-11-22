@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
 WORKDIR /app
+RUN pip install --no-cache-dir paho-mqtt
 COPY sureflap_bridge.py flapctl.py ./
 RUN chmod +x sureflap_bridge.py flapctl.py
 

@@ -34,6 +34,11 @@ import time
 import urllib.request
 from typing import Dict, Optional
 
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None
+
 LOCK_MODES = {0: "Unlocked", 1: "Keep In", 2: "Keep Out", 3: "Locked", 4: "Curfew"}
 LOCK_BY_NAME = {v.lower(): k for k, v in LOCK_MODES.items()}
 CURFEW_STATES = {1: "off", 2: "on", 3: "paused"}
@@ -56,7 +61,18 @@ class SureFlapBridge:
         self.ha_select = ha.get("lock_input_select", "input_select.catflap_lock_mode")
         self.ha_poll_sec = float(ha.get("poll_interval_sec", 2.0))
 
+        mq = cfg.get("mqtt", {})
+        self.mqtt_enabled = bool(mq.get("enabled", False))
+        self.mqtt_host = mq.get("host", "127.0.0.1")
+        self.mqtt_port = int(mq.get("port", 1883))
+        self.mqtt_user = mq.get("username", "")
+        self.mqtt_pass = os.environ.get("MQTT_PASSWORD") or mq.get("password", "")
+        self.mqtt_prefix = mq.get("topic_prefix", "sureflap").strip("/")
+        self.mqtt_discovery_prefix = mq.get("discovery_prefix", "homeassistant").strip("/")
+        self.mqtt_client = None
+
         self.pets: Dict[int, str] = {int(k): v for k, v in cfg.get("pets", {}).items()}
+        self.toggle_on_in: bool = bool(cfg.get("toggle_on_in", False))
         cf = cfg.get("curfew_fallback", {})
         self.fallback_lock = cf.get("lock_time", "18:30")
         self.fallback_unlock = cf.get("unlock_time", "06:00")
@@ -74,6 +90,8 @@ class SureFlapBridge:
         self.last24_time: Optional[str] = None
         self.last24_dir: Optional[int] = None
         self.last_ha_lock: Optional[str] = None
+        self.last_flip_ts: Dict[str, str] = {}
+        self.pending_unknown_exits: int = 0
         self.cmd_status = "idle"
 
         self.udp_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -135,6 +153,177 @@ class SureFlapBridge:
         khex = bytes(k[i] for i in range(4, 12)).hex()
         self.send_esp(f"setkey {hdr} {khex} {c12:02x}")
 
+    # ---- MQTT + Home Assistant Discovery helpers ----
+
+    def _mqtt_pub(self, subtopic: str, payload, retain: bool = True) -> None:
+        if not self.mqtt_client:
+            return
+        topic = subtopic if "/" in subtopic and subtopic.startswith(self.mqtt_discovery_prefix + "/") else f"{self.mqtt_prefix}/{subtopic}"
+        data = json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload)
+        self.mqtt_client.publish(topic, data, qos=1, retain=retain)
+
+    def _publish_mqtt_discovery(self) -> None:
+        if not self.mqtt_client:
+            return
+        dev = {
+            "identifiers": ["sureflap_esp32_hub"],
+            "name": "SureFlap Cat Flap",
+            "manufacturer": "SureFlap (ESP32-C5 Local Hub)",
+            "model": "Pet Door Connect",
+        }
+        avail = {
+            "availability_topic": f"{self.mqtt_prefix}/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+        }
+        dp = self.mqtt_discovery_prefix
+        p = self.mqtt_prefix
+
+        configs = [
+            (f"{dp}/sensor/sureflap_curfew/config", {
+                "name": "Curfew",
+                "unique_id": "sureflap_catflap_curfew",
+                "default_entity_id": "sensor.catflap_curfew",
+                "state_topic": f"{p}/curfew/state",
+                "json_attributes_topic": f"{p}/curfew/attrs",
+                "icon": "mdi:lock-clock",
+                "device": dev, **avail,
+            }),
+            (f"{dp}/sensor/sureflap_last_event/config", {
+                "name": "Last event",
+                "unique_id": "sureflap_catflap_last_event",
+                "default_entity_id": "sensor.catflap_last_event",
+                "state_topic": f"{p}/last_event/state",
+                "json_attributes_topic": f"{p}/last_event/attrs",
+                "icon": "mdi:door",
+                "device": dev, **avail,
+            }),
+            (f"{dp}/sensor/sureflap_lock_mode/config", {
+                "name": "Lock state",
+                "unique_id": "sureflap_catflap_lock_mode",
+                "default_entity_id": "sensor.catflap_lock_mode",
+                "state_topic": f"{p}/lock_mode/state",
+                "json_attributes_topic": f"{p}/lock_mode/attrs",
+                "icon": "mdi:lock-check",
+                "device": dev, **avail,
+            }),
+            (f"{dp}/sensor/sureflap_battery/config", {
+                "name": "Battery",
+                "unique_id": "sureflap_catflap_battery",
+                "default_entity_id": "sensor.catflap_battery",
+                "state_topic": f"{p}/battery/state",
+                "json_attributes_topic": f"{p}/battery/attrs",
+                "device_class": "voltage",
+                "state_class": "measurement",
+                "unit_of_measurement": "V",
+                "icon": "mdi:battery",
+                "device": dev, **avail,
+            }),
+            (f"{dp}/select/sureflap_lock_mode/config", {
+                "name": "Lock mode",
+                "unique_id": "sureflap_catflap_lock_select",
+                "default_entity_id": "select.catflap_lock_mode",
+                "state_topic": f"{p}/lock_mode/state",
+                "command_topic": f"{p}/lock_mode/set",
+                "options": list(LOCK_MODES.values()),
+                "icon": "mdi:door-closed-lock",
+                "device": dev, **avail,
+            }),
+        ]
+        for pet in self.pets.values():
+            pl = pet.lower()
+            configs.append((f"{dp}/sensor/sureflap_pet_{pl}/config", {
+                "name": pet,
+                "unique_id": f"sureflap_catflap_{pl}",
+                "default_entity_id": f"sensor.catflap_{pl}",
+                "state_topic": f"{p}/pet/{pl}/state",
+                "json_attributes_topic": f"{p}/pet/{pl}/attrs",
+                "icon": "mdi:cat",
+                "device": dev, **avail,
+            }))
+            configs.append((f"{dp}/button/sureflap_flip_{pl}/config", {
+                "name": f"Flip {pet}",
+                "unique_id": f"sureflap_catflap_flip_{pl}",
+                "default_entity_id": f"button.catflap_flip_{pl}",
+                "command_topic": f"{p}/pet/{pl}/flip",
+                "icon": "mdi:swap-horizontal",
+                "device": dev, **avail,
+            }))
+
+        for topic, cfg in configs:
+            self._mqtt_pub(topic, cfg, retain=True)
+        self.log(f"Published {len(configs)} HA MQTT Discovery configs")
+
+    def _flip_pet(self, pet: str) -> None:
+        loc = self.state.setdefault("location", {})
+        since = self.state.setdefault("since", {})
+        new_loc = "outside" if loc.get(pet) == "inside" else "inside"
+        t = time.strftime("%H:%M:%S")
+        loc[pet] = new_loc
+        since[pet] = t
+        self._save_state()
+        self.log(f"MANUAL FLIP: {pet} -> {new_loc}")
+        self._push_pet(pet, new_loc, t, inferred=False)
+
+    def _set_lock_from_ha(self, val: str) -> None:
+        code = LOCK_BY_NAME.get(val.strip().lower())
+        if code is None:
+            return
+        self.cmd_status = f"sending {LOCK_MODES[code]}"
+        self.send_esp(f"setlock {code}")
+        self.push_lock_sensor()
+
+    def _start_mqtt(self) -> None:
+        if mqtt is None:
+            raise RuntimeError("paho-mqtt is required when mqtt.enabled is true")
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="sureflap-esp32-bridge")
+        if self.mqtt_user:
+            client.username_pw_set(self.mqtt_user, self.mqtt_pass)
+        client.will_set(f"{self.mqtt_prefix}/status", "offline", qos=1, retain=True)
+
+        def on_connect(c, userdata, flags, reason_code, properties=None):
+            self.log(f"MQTT connected to {self.mqtt_host}:{self.mqtt_port} ({reason_code})")
+            c.publish(f"{self.mqtt_prefix}/status", "online", qos=1, retain=True)
+            c.subscribe(f"{self.mqtt_prefix}/lock_mode/set", qos=1)
+            c.subscribe(f"{self.mqtt_prefix}/pet/+/flip", qos=1)
+            c.subscribe(f"{self.mqtt_discovery_prefix}/status", qos=1)
+            self._publish_mqtt_discovery()
+            self.push_all_ha()
+
+        def on_message(c, userdata, msg):
+            topic = msg.topic
+            payload = msg.payload.decode("utf-8", errors="replace").strip()
+            if topic == f"{self.mqtt_prefix}/lock_mode/set":
+                self.log(f"MQTT lock_mode/set -> {payload}")
+                self._set_lock_from_ha(payload)
+            elif topic.startswith(f"{self.mqtt_prefix}/pet/") and topic.endswith("/flip"):
+                pl = topic.split("/")[-2].lower()
+                for pet in self.pets.values():
+                    if pet.lower() == pl:
+                        self._flip_pet(pet)
+                        break
+            elif topic == f"{self.mqtt_discovery_prefix}/status" and payload == "online":
+                self._publish_mqtt_discovery()
+                self.push_all_ha()
+
+        client.on_connect = on_connect
+        client.on_message = on_message
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        client.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
+        client.loop_start()
+        self.mqtt_client = client
+
+    def _push_pet(self, pet: str, loc: str, since_t: Optional[str], inferred: bool = False) -> None:
+        attrs = {
+            "since": since_t,
+            "friendly_name": pet,
+            "inferred": inferred,
+            "icon": "mdi:cat" if loc == "inside" else "mdi:tree",
+        }
+        self._mqtt_pub(f"pet/{pet.lower()}/state", loc, retain=True)
+        self._mqtt_pub(f"pet/{pet.lower()}/attrs", attrs, retain=True)
+        self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {"state": loc, "attributes": attrs})
+
     # ---- Home Assistant REST helpers ----
 
     def ha_post(self, path: str, body: dict) -> Optional[bytes]:
@@ -181,64 +370,62 @@ class SureFlapBridge:
         lo, hi = self._curfew_window()
         locked = self._in_curfew_now(hhmm)
         c_info = self.state.get("curfew") or {}
-        self.ha_post("/api/states/sensor.catflap_curfew", {
-            "state": "locked" if locked else "open",
-            "attributes": {
-                "friendly_name": "Cat flap curfew",
-                "icon": "mdi:lock-clock" if locked else "mdi:lock-open-variant",
-                "lock_time": lo,
-                "unlock_time": hi,
-                "flap_curfew_state": c_info.get("state", "unknown"),
-                "detail": "Keep in: pets can re-enter but not exit" if locked else "Pets can come and go",
-            },
-        })
+        curfew_state = "locked" if locked else "open"
+        curfew_attrs = {
+            "friendly_name": "Cat flap curfew",
+            "icon": "mdi:lock-clock" if locked else "mdi:lock-open-variant",
+            "lock_time": lo,
+            "unlock_time": hi,
+            "until": hi if locked else None,
+            "locks_at": lo if not locked else None,
+            "flap_curfew_state": c_info.get("state", "unknown"),
+            "detail": "Keep in: pets can re-enter but not exit" if locked else "Pets can come and go",
+        }
+        self._mqtt_pub("curfew/state", curfew_state, retain=True)
+        self._mqtt_pub("curfew/attrs", {k: v for k, v in curfew_attrs.items() if v is not None}, retain=True)
+        self.ha_post("/api/states/sensor.catflap_curfew", {"state": curfew_state, "attributes": curfew_attrs})
         self.push_lock_sensor()
         self.push_battery_sensor()
         ev = self.state.get("last_event")
         if ev:
-            self.ha_post("/api/states/sensor.catflap_last_event", {
-                "state": self._fmt_event(ev["pet"], ev["direction"]),
-                "attributes": {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"},
-            })
+            ev_str = self._fmt_event(ev["pet"], ev["direction"])
+            ev_attrs = {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"}
+            self._mqtt_pub("last_event/state", ev_str, retain=True)
+            self._mqtt_pub("last_event/attrs", ev_attrs, retain=True)
+            self.ha_post("/api/states/sensor.catflap_last_event", {"state": ev_str, "attributes": ev_attrs})
         for pet, loc in self.state.get("location", {}).items():
-            self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {
-                "state": loc,
-                "attributes": {
-                    "since": self.state.get("since", {}).get(pet),
-                    "friendly_name": pet,
-                    "icon": "mdi:cat" if loc == "inside" else "mdi:tree",
-                },
-            })
+            self._push_pet(pet, loc, self.state.get("since", {}).get(pet))
 
     def push_lock_sensor(self) -> None:
-        self.ha_post("/api/states/sensor.catflap_lock_mode", {
-            "state": self.state.get("lock_mode", "Unknown"),
-            "attributes": {
-                "friendly_name": "Cat flap lock mode",
-                "icon": "mdi:door-closed-lock",
-                "command_status": self.cmd_status,
-                "curfew_schedule": self.state.get("curfew"),
-            },
-        })
+        mode = self.state.get("lock_mode", "Unknown")
+        attrs = {
+            "friendly_name": "Cat flap lock mode",
+            "icon": "mdi:door-closed-lock",
+            "command_status": self.cmd_status,
+            "curfew_schedule": self.state.get("curfew"),
+        }
+        self._mqtt_pub("lock_mode/state", mode, retain=True)
+        self._mqtt_pub("lock_mode/attrs", attrs, retain=True)
+        self.ha_post("/api/states/sensor.catflap_lock_mode", {"state": mode, "attributes": attrs})
 
     def push_battery_sensor(self) -> None:
         batt = self.state.get("battery")
         if not batt:
             return
-        self.ha_post("/api/states/sensor.catflap_battery", {
-            "state": batt["volts"],
-            "attributes": {
-                "friendly_name": "Cat flap battery",
-                "unit_of_measurement": "V",
-                "device_class": "voltage",
-                "state_class": "measurement",
-                "icon": "mdi:battery" if batt["pct"] > 25 else "mdi:battery-alert",
-                "battery_pct": batt["pct"],
-                "adc": batt["adc"],
-                "flap_clock": batt.get("clock"),
-                "updated": batt.get("time"),
-            },
-        })
+        attrs = {
+            "friendly_name": "Cat flap battery",
+            "unit_of_measurement": "V",
+            "device_class": "voltage",
+            "state_class": "measurement",
+            "icon": "mdi:battery" if batt["pct"] > 25 else "mdi:battery-alert",
+            "battery_pct": batt["pct"],
+            "adc": batt["adc"],
+            "flap_clock": batt.get("clock"),
+            "updated": batt.get("time"),
+        }
+        self._mqtt_pub("battery/state", batt["volts"], retain=True)
+        self._mqtt_pub("battery/attrs", attrs, retain=True)
+        self.ha_post("/api/states/sensor.catflap_battery", {"state": batt["volts"], "attributes": attrs})
 
     def sync_ha_select(self, mode_name: str) -> None:
         self.last_ha_lock = mode_name
@@ -249,26 +436,54 @@ class SureFlapBridge:
 
     def poll_ha_lock(self) -> None:
         st = self.ha_get(f"/api/states/{self.ha_select}")
-        if not st or "state" not in st:
-            return
-        val = st["state"]
-        if self.last_ha_lock is None:
-            self.last_ha_lock = val
-            return
-        if val != self.last_ha_lock:
-            self.last_ha_lock = val
-            code = LOCK_BY_NAME.get(val.lower())
-            if code is not None:
-                self.cmd_status = f"sending {val}"
-                self.send_esp(f"setlock {code}")
-                self.push_lock_sensor()
+        if st and "state" in st:
+            val = st["state"]
+            if self.last_ha_lock is None:
+                self.last_ha_lock = val
+            elif val != self.last_ha_lock:
+                self.last_ha_lock = val
+                code = LOCK_BY_NAME.get(val.lower())
+                if code is not None:
+                    self.cmd_status = f"sending {val}"
+                    self.send_esp(f"setlock {code}")
+                    self.push_lock_sensor()
+
+        # Optional 1-tap manual flip buttons (input_button.catflap_flip_<pet>)
+        for pet in self.pets.values():
+            eid = f"input_button.catflap_flip_{pet.lower()}"
+            bst = self.ha_get(f"/api/states/{eid}")
+            if not bst or "state" not in bst:
+                continue
+            ts = bst["state"]
+            if eid not in self.last_flip_ts:
+                self.last_flip_ts[eid] = ts
+            elif ts != self.last_flip_ts[eid] and ts not in ("unknown", "unavailable"):
+                self.last_flip_ts[eid] = ts
+                loc = self.state.setdefault("location", {})
+                since = self.state.setdefault("since", {})
+                new_loc = "outside" if loc.get(pet) == "inside" else "inside"
+                t = time.strftime("%H:%M:%S")
+                loc[pet] = new_loc
+                since[pet] = t
+                self._save_state()
+                self.log(f"MANUAL FLIP: {pet} -> {new_loc}")
+                self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {
+                    "state": new_loc,
+                    "attributes": {
+                        "since": t,
+                        "friendly_name": pet,
+                        "inferred": False,
+                        "icon": "mdi:cat" if new_loc == "inside" else "mdi:tree",
+                    },
+                })
 
     # ---- Protocol decoding & keystream auto-learning ----
 
     def _fmt_event(self, pet: str, direction: str) -> str:
         if pet == "unknown":
             return {"out": "A pet went out", "in": "A pet came in",
-                    "tried to go out": "A pet tried to go out"}.get(direction, f"A pet {direction}")
+                    "tried to go out": "A pet tried to go out",
+                    "looked in": "A pet looked in"}.get(direction, f"A pet {direction}")
         return f"{pet} {direction}"
 
     def _emit_pet(self, t: str, direction: str, slot: Optional[int], flap_time: str) -> None:
@@ -283,6 +498,8 @@ class SureFlapBridge:
             cands = [p for p, where in loc.items() if where == want]
             if len(cands) == 1:
                 pet, inferred = cands[0], True
+            elif direction == "out":
+                self.pending_unknown_exits = min(self.pending_unknown_exits + 1, max(1, len(self.pets)))
         if pet != "unknown" and direction in ("in", "out"):
             loc[pet] = "outside" if direction == "out" else "inside"
             since[pet] = t
@@ -291,21 +508,14 @@ class SureFlapBridge:
         self._save_state()
         ev_str = self._fmt_event(pet, direction)
         self.log(f"EVENT: {ev_str} (flap {flap_time}{', inferred' if inferred else ''})")
+        ev_attrs = {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"}
+        self._mqtt_pub("event", ev, retain=False)
+        self._mqtt_pub("last_event/state", ev_str, retain=True)
+        self._mqtt_pub("last_event/attrs", ev_attrs, retain=True)
         self.ha_post("/api/events/catflap_event", ev)
-        self.ha_post("/api/states/sensor.catflap_last_event", {
-            "state": ev_str,
-            "attributes": {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"},
-        })
-        if pet != "unknown":
-            self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {
-                "state": loc.get(pet, "unknown"),
-                "attributes": {
-                    "since": t,
-                    "friendly_name": pet,
-                    "inferred": inferred,
-                    "icon": "mdi:cat" if loc.get(pet) == "inside" else "mdi:tree",
-                },
-            })
+        self.ha_post("/api/states/sensor.catflap_last_event", {"state": ev_str, "attributes": ev_attrs})
+        if pet != "unknown" and direction in ("in", "out"):
+            self._push_pet(pet, loc.get(pet, "unknown"), t, inferred=inferred)
 
     def _learn_key(self, hdr: str, b: bytes, t: str) -> Optional[Dict[int, int]]:
         k = self.sessions.setdefault(hdr, {})
@@ -400,7 +610,7 @@ class SureFlapBridge:
         if reg == 33 and rlen in (3, 5) and 10 in k and 11 in k:
             adc = b[10] ^ k[10]
             hr = b[11] ^ k[11]
-            mn = (b[12] ^ k[12]) if 12 in k else 0
+            mn = ((b[12] ^ k[12]) & 0x7F) if 12 in k else 0
             volts = round(2.1075 + adc * 0.0225, 2)
             pct = max(0, min(100, round((volts - 4.4) / 1.6 * 100)))
             clock = f"{hr:02d}:{mn:02d}" if hr < 24 and mn < 60 else None
@@ -443,8 +653,30 @@ class SureFlapBridge:
         # 14B Named pet follow-up (reg 528 + 3*(slot-1))
         if len(b) == 14 and reg >= 528 and (reg - 528) % 3 == 0 and rlen == 3:
             slot = ((reg - 528) // 3) + 1
+            pet = self.pets.get(slot, f"slot_{slot}")
             dir_byte = self.last24_dir if self.last24_dir is not None else ((b[12] ^ k[12]) if 12 in k else 0x61)
-            direction = "in" if (dir_byte & 0x0F) == 1 else "out"
+            low = dir_byte & 0x0F
+            if low in (0, 5):
+                direction = "looked in"
+            elif low == 2:
+                direction = "out"
+            elif self.toggle_on_in:
+                blocked = self.state.get("lock_mode") in ("Keep In", "Locked") or (
+                    self.state.get("lock_mode") == "Curfew" and self._in_curfew_now(t[:5])
+                )
+                if blocked:
+                    direction = "in"
+                    self.pending_unknown_exits = 0
+                elif self.state.get("location", {}).get(pet) == "inside":
+                    if self.pending_unknown_exits > 0:
+                        self.pending_unknown_exits -= 1
+                        direction = "in"
+                    else:
+                        direction = "out"
+                else:
+                    direction = "in"
+            else:
+                direction = "in"
             self._emit_pet(t, direction, slot, self.last24_time or "??:??")
             return
 
@@ -487,6 +719,8 @@ class SureFlapBridge:
     def run(self) -> None:
         if self.cfg.get("ota_enabled"):
             self._start_ota_server()
+        if self.mqtt_enabled:
+            self._start_mqtt()
 
         z_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         z_sock.bind(("0.0.0.0", self.zep_port))
@@ -521,12 +755,56 @@ class SureFlapBridge:
                 self.push_all_ha()
 
 
+def _load_config(path: str) -> dict:
+    if path and os.path.isfile(path):
+        with open(path) as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+
+    # Allow pure environment-variable configuration for zero-file Docker deployments
+    if os.environ.get("ESP32_IP"):
+        cfg["esp32_ip"] = os.environ["ESP32_IP"]
+    if os.environ.get("STATE_FILE"):
+        cfg["state_file"] = os.environ["STATE_FILE"]
+    if os.environ.get("LOG_FILE"):
+        cfg["log_file"] = os.environ["LOG_FILE"]
+    if os.environ.get("TOGGLE_ON_IN"):
+        cfg["toggle_on_in"] = os.environ["TOGGLE_ON_IN"].lower() in ("1", "true", "yes")
+    if os.environ.get("PETS"):
+        pets = {}
+        for pair in os.environ["PETS"].split(","):
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                pets[k.strip()] = v.strip()
+        if pets:
+            cfg["pets"] = pets
+    if os.environ.get("CURFEW_LOCK") or os.environ.get("CURFEW_UNLOCK"):
+        cf = cfg.setdefault("curfew_fallback", {})
+        if os.environ.get("CURFEW_LOCK"):
+            cf["lock_time"] = os.environ["CURFEW_LOCK"]
+        if os.environ.get("CURFEW_UNLOCK"):
+            cf["unlock_time"] = os.environ["CURFEW_UNLOCK"]
+    if os.environ.get("MQTT_HOST"):
+        mq = cfg.setdefault("mqtt", {})
+        mq["enabled"] = True
+        mq["host"] = os.environ["MQTT_HOST"]
+        if os.environ.get("MQTT_PORT"):
+            mq["port"] = int(os.environ["MQTT_PORT"])
+        if os.environ.get("MQTT_USER"):
+            mq["username"] = os.environ["MQTT_USER"]
+    if os.environ.get("OTA_ENABLED"):
+        cfg["ota_enabled"] = os.environ["OTA_ENABLED"].lower() in ("1", "true", "yes")
+    if not cfg.get("esp32_ip"):
+        raise SystemExit("Config error: set esp32_ip in config.json or ESP32_IP env var")
+    return cfg
+
+
 def main():
     ap = argparse.ArgumentParser(description="SureFlap ESP32-C5 Local Bridge")
     ap.add_argument("-c", "--config", default=os.environ.get("SUREFLAP_CONFIG", "config.json"))
     args = ap.parse_args()
-    with open(args.config) as f:
-        cfg = json.load(f)
+    cfg = _load_config(args.config)
     SureFlapBridge(cfg).run()
 
 

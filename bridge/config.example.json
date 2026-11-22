@@ -3,15 +3,21 @@
   "esp32_ctrl_port": 17755,
   "zep_listen_port": 17754,
   "stat_listen_port": 17756,
-  "state_file": "./state.json",
-  "log_file": "./hub.log",
+  "state_file": "/data/state.json",
+  "log_file": "/data/bridge.log",
   "pcap_file": "",
-  "ota_enabled": false,
-  "ota_port": 8000,
-  "ota_dir": "./ota",
+  "mqtt": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "topic_prefix": "sureflap",
+    "discovery_prefix": "homeassistant"
+  },
   "home_assistant": {
-    "url": "http://homeassistant.local:8123",
-    "token": "REPLACE_WITH_LONG_LIVED_ACCESS_TOKEN",
+    "url": "",
+    "token": "",
     "lock_input_select": "input_select.catflap_lock_mode",
     "poll_interval_sec": 2.0
   },
@@ -19,8 +25,12 @@
     "1": "CatOne",
     "2": "CatTwo"
   },
+  "toggle_on_in": true,
   "curfew_fallback": {
     "lock_time": "18:30",
     "unlock_time": "06:00"
-  }
+  },
+  "ota_enabled": true,
+  "ota_port": 8000,
+  "ota_dir": "/data/ota"
 }

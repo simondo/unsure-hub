@@ -1,2 +1,3 @@
-# sureflap_bridge.py and flapctl.py use Python 3.9+ standard library only.
-# No third-party packages are required.
+# Optional: only required when using MQTT transport (recommended for Home Assistant).
+# REST-only mode uses Python 3.9+ stdlib with zero third-party packages.
+paho-mqtt>=2.0.0
