@@ -2,7 +2,7 @@
 
 A **$7, 100% local replacement for the SureFlap / Sure Petcare Connect Hub** built on an **ESP32-C5** (dual-band 5 GHz Wi-Fi + IEEE 802.15.4) and a lightweight Docker/Python bridge for **Home Assistant** (MQTT Auto-Discovery or REST).
 
-No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions — just direct 802.15.4 / MiWi communication between your ESP32-C5 and your SureFlap Microchip Pet Door / Cat Flap Connect.
+No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions — just direct 802.15.4 / MiWi communication between your ESP32-C5 and your SureFlap Microchip Cat Flap Connect (Pet Door Connect untested).
 
 ```
 ┌──────────────────────┐   802.15.4 Ch 15 (PAN 0x3421)   ┌────────────────────┐   UDP (5 GHz Wi-Fi)   ┌──────────────────────┐   MQTT Discovery   ┌────────────────┐
@@ -25,7 +25,7 @@ No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions �
 
 ## Hardware Required & Compatibility
 
-* Any **ESP32-C5** dev board (e.g., ESP32-C5-DevKitC-1, ~$7) — chosen because it combines **5 GHz Wi-Fi** and **IEEE 802.15.4** on a single chip.
+* Any **ESP32-C5** dev board with 4 MB+ flash (e.g., ESP32-C5-DevKitC-1, ~$7) — chosen because it combines **5 GHz Wi-Fi** and **IEEE 802.15.4** on a single chip. **Tested on:** DFRobot **FireBeetle 2 ESP32-C5** (DFR1222).
 * **Tested on:** **SureFlap Microchip Cat Flap Connect** (register-based firmware; leave the physical rotary dial in **Position 1 / Unlocked** so the motorized lock pins respond to wireless commands).
 * **Untested (may require register/direction adjustments):** SureFlap Microchip Pet Door Connect (DualScan), Microchip Pet Feeder Connect, and Felaqua Connect.
 * A host (Mac, Linux box, Raspberry Pi, or Docker host) on the same LAN to run `bridge/sureflap_bridge.py`.

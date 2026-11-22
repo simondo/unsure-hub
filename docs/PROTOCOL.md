@@ -1,6 +1,6 @@
-# SureFlap Pet Door Connect — Local 802.15.4 / MiWi Protocol Reference
+# SureFlap Cat Flap Connect — Local 802.15.4 / MiWi Protocol Reference
 
-This document summarizes the over-the-air protocol used between a **SureFlap Microchip Pet Door Connect** (and compatible register-based SureFlap flaps) and a local coordinator emulated on an **ESP32-C5**.
+This document summarizes the over-the-air protocol used between a **SureFlap Microchip Cat Flap Connect** (tested; the Pet Door Connect and other register-based SureFlap devices are expected to be similar but untested) and a local coordinator emulated on an **ESP32-C5**.
 
 ---
 
@@ -75,7 +75,7 @@ Whenever a flap pairs or rotates `H0 H1`, the keystream bytes `k[4..11]` needed 
 
 ---
 
-## 3. Verified Register Map (Pet Door Connect)
+## 3. Verified Register Map (Cat Flap Connect)
 
 | Register | Hex | Length | R/W | Description |
 |---:|---|---:|---|---|
