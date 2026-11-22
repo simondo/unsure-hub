@@ -23,11 +23,15 @@ No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions �
 
 ---
 
-## Hardware Required
+## Hardware Required & Compatibility
 
 * Any **ESP32-C5** dev board (e.g., ESP32-C5-DevKitC-1, ~$7) — chosen because it combines **5 GHz Wi-Fi** and **IEEE 802.15.4** on a single chip.
-* A **SureFlap Microchip Pet Door Connect** (tested on register-based Pet Door Connect firmware; leave the physical rotary dial in **Position 1 / Unlocked** so the motorized lock pins respond to wireless commands).
+* **Tested on:** **SureFlap Microchip Cat Flap Connect** (register-based firmware; leave the physical rotary dial in **Position 1 / Unlocked** so the motorized lock pins respond to wireless commands).
+* **Untested (may require register/direction adjustments):** SureFlap Microchip Pet Door Connect (DualScan), Microchip Pet Feeder Connect, and Felaqua Connect.
 * A host (Mac, Linux box, Raspberry Pi, or Docker host) on the same LAN to run `bridge/sureflap_bridge.py`.
+
+> [!WARNING]
+> **Pet Safety & Disclaimer:** This is an independent, reverse-engineered open-source project and is **not affiliated with, endorsed by, or connected to Sure Petcare / SureFlap** (all product names and trademarks belong to their respective owners). Software bugs, RF interference, or power loss could cause a flap to lock a pet inside or outside unexpectedly. Always verify lock behavior thoroughly before relying on it, keep the flap's onboard curfew configured as a fallback, and never rely on this project as the sole safeguard for your pet's welfare.
 
 ---
 
@@ -60,9 +64,11 @@ With **MQTT Auto-Discovery** enabled, Home Assistant automatically discovers the
 3. In the bridge log you'll see `beaconreq` → `assoc` → `start` → periodic `online` check-ins every 5.56 seconds.
 4. Once the flap sends its first movement + register frames (or you toggle the dial once), the bridge automatically learns the session keystream and sends `setkey` to the ESP32.
 
-### 4. Add Home Assistant Controls (`homeassistant/`)
+### 4. Add Home Assistant Automations & Dashboard (`homeassistant/`)
 
-1. Copy [`homeassistant/packages/sureflap_local.yaml`](homeassistant/packages/sureflap_local.yaml) into your Home Assistant `packages/` directory (or merge the `input_select` and `automation` blocks into `configuration.yaml`) and reload.
+With MQTT Auto-Discovery enabled, all entities (`sensor.catflap_*`, `select.catflap_lock_mode`, `button.catflap_flip_*`) are created automatically — no manual `input_select` or helper YAML is required.
+
+1. *(Optional)* Copy [`homeassistant/packages/sureflap_local.yaml`](homeassistant/packages/sureflap_local.yaml) into your Home Assistant `packages/` directory (or merge its `automation` block into `configuration.yaml`) to add the evening curfew safety-net and low-battery notification automations.
 2. Add the tiles from [`homeassistant/dashboard-card.yaml`](homeassistant/dashboard-card.yaml) to your dashboard.
 
 ### 5. Control & Program Curfew via CLI (`bridge/flapctl.py`)
@@ -90,9 +96,21 @@ With **MQTT Auto-Discovery** enabled, Home Assistant automatically discovers the
 
 ---
 
-## Protocol Documentation
+## Returning to the Official SureFlap Hub
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full IEEE 802.15.4 / MiWi handshake, XOR keystream auto-learning math, universal checksum invariant (`XOR(plain[4..L-1]) == 0x2C`), and Pet Door Connect register map.
+Your flap's learned pet microchips are stored inside the flap itself, so switching back takes under a minute:
+
+1. Unplug or power off the ESP32-C5 (and stop the Docker bridge).
+2. Plug in your official SureFlap Hub and wait for its ears to turn solid green.
+3. Press the pairing/cog button on the flap (or pull and re-insert its batteries) so it re-associates with the official hub.
+
+---
+
+## Protocol Documentation & Diagnostic Commands
+
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full IEEE 802.15.4 / MiWi handshake, XOR keystream auto-learning math, universal checksum invariant (`XOR(plain[4..L-1]) == 0x2C`), and register map.
+
+For protocol debugging, the ESP32-C5 firmware also exposes advanced UDP control commands on port `17755`: `kb <idx> <val>` (radio/reply tuning knobs `kb[0..10]`), `lock <ch>` / `hop [dwell_ms]` (IEEE 802.15.4 channel lock/scan), and `txraw <hex> [retries]` (send raw MiWi payload on the next 0x09 window).
 
 ## Credits & License
 

@@ -773,7 +773,7 @@ class SureFlapBridge:
                 if path in ("/", "/index.html"):
                     ver = html.escape(fw_version())
                     has_merged = find_fw("sureflap_hub_merged.bin") is not None
-                    has_ota = (find_fw("sureflap_hub.bin") or find_fw("c5_sniffer.bin")) is not None
+                    has_ota = find_fw("sureflap_hub.bin") is not None
                     pets_html = "".join(
                         f"<li><b>{html.escape(p)}</b>: {html.escape(str(bridge.state.get('location', {}).get(p, 'unknown')))}</li>"
                         for p in bridge.pets.values()
@@ -802,7 +802,7 @@ class SureFlapBridge:
                     page_html = f"""<!doctype html><html><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>SureFlap ESP32-C5 Local Hub</title>
-<script type='module' src='https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module'></script>
+<script type='module' src='https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module'></script>
 <style>
 body{{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;max-width:720px;margin:28px auto;padding:0 16px;line-height:1.5}}
 .card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;margin-bottom:16px}}
@@ -866,7 +866,7 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
                             b"Cannot determine bridge LAN IPv4 for OTA; set bridge_ip or BRIDGE_IP.\n",
                         )
                         return
-                    fname = "sureflap_hub.bin" if find_fw("sureflap_hub.bin") else "c5_sniffer.bin"
+                    fname = "sureflap_hub.bin"
                     bridge.send_esp(f"ota http://{host}:{ota_port}/{fname}")
                     self.send_response(303)
                     self.send_header("Location", "/")
