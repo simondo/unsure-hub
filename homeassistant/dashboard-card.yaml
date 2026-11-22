@@ -1,5 +1,5 @@
-# Example Lovelace dashboard section for Home Assistant.
-# Replace `catone` / `cattwo` with the pet names configured in bridge/config.json.
+# Example Lovelace dashboard section for Home Assistant (MQTT Auto-Discovery).
+# Replace `catone` / `cattwo` with the pet names configured in bridge/config.json or PETS env var.
 type: grid
 columns: 2
 square: false
@@ -7,11 +7,33 @@ cards:
   - type: tile
     entity: sensor.catflap_catone
     name: Cat One
+    state_content: [state, since]
   - type: tile
     entity: sensor.catflap_cattwo
     name: Cat Two
+    state_content: [state, since]
+  - type: button
+    entity: button.catflap_flip_catone
+    name: Flip Cat One
+    icon: mdi:swap-horizontal
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.catflap_flip_catone
+  - type: button
+    entity: button.catflap_flip_cattwo
+    name: Flip Cat Two
+    icon: mdi:swap-horizontal
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.catflap_flip_cattwo
   - type: tile
-    entity: input_select.catflap_lock_mode
+    entity: select.catflap_lock_mode
     name: Set Lock Mode
     features:
       - type: select-options

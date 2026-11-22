@@ -85,7 +85,7 @@ With **MQTT Auto-Discovery** enabled, Home Assistant automatically discovers the
 
 1. Program your normal daily schedule onto the flap itself (`./bridge/flapctl.py curfew 18:30 06:00 --enable`).
 2. Leave the flap in **Curfew** mode — it will lock and unlock autonomously even if your network or Home Assistant is offline.
-3. Use `input_select.catflap_lock_mode` in Home Assistant whenever you want an ad-hoc override (`Keep In` before a vet trip, `Unlocked` to let a pet out briefly).
+3. Use `select.catflap_lock_mode` in Home Assistant whenever you want an ad-hoc override (`Keep In` before a vet trip, `Unlocked` to let a pet out briefly).
 4. Enable the safety-net automation in [`homeassistant/packages/sureflap_local.yaml`](homeassistant/packages/sureflap_local.yaml) so an accidental manual `Unlocked` automatically reverts to `Curfew` at curfew start.
 
 ---
