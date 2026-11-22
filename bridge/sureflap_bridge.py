@@ -484,7 +484,7 @@ class SureFlapBridge:
         self.push_battery_sensor()
         ev = self.state.get("last_event")
         if ev:
-            ev_str = self._fmt_event(ev["pet"], ev["direction"])
+            ev_str = self._fmt_event(ev["pet"], ev["direction"], ev.get("time"))
             ev_attrs = {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"}
             self._mqtt_pub("last_event/state", ev_str, retain=True)
             self._mqtt_pub("last_event/attrs", ev_attrs, retain=True)
@@ -556,12 +556,14 @@ class SureFlapBridge:
 
     # ---- Protocol decoding & keystream auto-learning ----
 
-    def _fmt_event(self, pet: str, direction: str) -> str:
+    def _fmt_event(self, pet: str, direction: str, t: Optional[str] = None) -> str:
         if pet == "unknown":
-            return {"out": "A pet went out", "in": "A pet came in",
+            base = {"out": "A pet went out", "in": "A pet came in",
                     "tried to go out": "A pet tried to go out",
                     "looked in": "A pet looked in"}.get(direction, f"A pet {direction}")
-        return f"{pet} {direction}"
+        else:
+            base = f"{pet} {direction}"
+        return f"{base} · {t[:5]}" if t else base
 
     def _emit_pet(self, t: str, direction: str, slot: Optional[int], flap_time: str) -> None:
         pet = self.pets.get(slot, f"slot_{slot}" if slot is not None else "unknown")
@@ -583,7 +585,7 @@ class SureFlapBridge:
         ev = {"pet": pet, "direction": direction, "flap_time": flap_time, "inferred": inferred, "time": t}
         self.state["last_event"] = ev
         self._save_state()
-        ev_str = self._fmt_event(pet, direction)
+        ev_str = self._fmt_event(pet, direction, t)
         self.log(f"EVENT: {ev_str} (flap {flap_time}{', inferred' if inferred else ''})")
         ev_attrs = {**ev, "friendly_name": "Cat flap last event", "icon": "mdi:door"}
         self._mqtt_pub("event", ev, retain=False)

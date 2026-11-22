@@ -442,6 +442,17 @@ class TestPetStateMachine(BridgeTestBase):
         self.assertEqual(bridge.state["location"]["Luna"], "outside")
         self.assertEqual(bridge.state["last_event"]["direction"], "out")
 
+        # Two consecutive identical "in" events at different times produce distinct last_event states
+        # so Home Assistant's Logbook records both (e.g. pet let out back door then returns via flap).
+        published = []
+        mock_mqtt = MagicMock()
+        mock_mqtt.publish.side_effect = lambda topic, data, qos=1, retain=True: published.append((topic, data))
+        bridge.mqtt_client = mock_mqtt
+        self._send_pet_event(bridge, "18:55:00", 1, 0x61, 400.0)
+        self._send_pet_event(bridge, "21:14:00", 1, 0x61, 500.0)
+        last_ev_states = [d for t, d in published if t == "sureflap/last_event/state"]
+        self.assertEqual(last_ev_states, ["Luna in · 18:55", "Luna in · 21:14"])
+
     def test_toggle_on_in_unlocked_vs_curfew_locked(self):
         bridge = self.make_bridge(toggle_on_in=True)
         bridge.state["lock_mode"] = "Unlocked"
