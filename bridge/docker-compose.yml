@@ -1,6 +1,6 @@
 services:
   sureflap-bridge:
-    image: ghcr.io/simondo/sureflap-esp32-hub:latest
+    image: ghcr.io/simondo/unsure-hub:latest
     # To build locally instead (e.g. after editing the bridge), comment out `image:` and use:
     # build: .
     container_name: sureflap-bridge

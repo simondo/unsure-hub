@@ -1,4 +1,4 @@
-# SureFlap ESP32-C5 Local Hub
+# Unsure Hub — local ESP32-C5 hub for SureFlap Cat Flap Connect
 
 A **$7, 100% local replacement for the SureFlap / Sure Petcare Connect Hub** built on an **ESP32-C5** (dual-band 5 GHz Wi-Fi + IEEE 802.15.4) and a lightweight Docker/Python bridge for **Home Assistant** (MQTT Auto-Discovery or REST).
 

@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/sureflap-esp32-hub/bridge
-ExecStart=/usr/bin/python3 -u /opt/sureflap-esp32-hub/bridge/sureflap_bridge.py -c /opt/sureflap-esp32-hub/bridge/config.json
+WorkingDirectory=/opt/unsure-hub/bridge
+ExecStart=/usr/bin/python3 -u /opt/unsure-hub/bridge/sureflap_bridge.py -c /opt/unsure-hub/bridge/config.json
 Restart=always
 RestartSec=5
 
