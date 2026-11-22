@@ -4,7 +4,7 @@
   "zep_listen_port": 17754,
   "stat_listen_port": 17756,
   "state_file": "/data/state.json",
-  "log_file": "/data/bridge.log",
+  "log_file": "",
   "pcap_file": "",
   "mqtt": {
     "enabled": true,

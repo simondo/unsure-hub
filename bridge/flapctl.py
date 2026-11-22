@@ -59,20 +59,29 @@ def main():
 
     sub.add_parser("getkey", help="Ask ESP32 to report its current session keystream")
 
+    p_sink = sub.add_parser("sink", help="Change ESP32 bridge server IP at runtime (saved to NVS)")
+    p_sink.add_argument("sink_ip", help="New bridge server IPv4 address")
+
+    sub.add_parser("factoryreset", help="Erase ESP32 NVS config and reboot into SureFlap-Hub-Setup AP")
+
     args = ap.parse_args()
     cfg = {}
     if os.path.isfile(args.config):
         with open(args.config) as f:
             cfg = json.load(f)
-    ip = args.ip or cfg.get("esp32_ip")
+    ip = args.ip or os.environ.get("ESP32_IP") or cfg.get("esp32_ip")
     port = args.port or int(cfg.get("esp32_ctrl_port", 17755))
     if not ip:
-        sys.exit("Error: provide --ip or set esp32_ip in config.json")
+        sys.exit("Error: provide --ip, set ESP32_IP env var, or set esp32_ip in config.json")
 
     if args.cmd == "lock":
         send_udp(ip, port, f"setlock {args.mode}")
     elif args.cmd == "getkey":
         send_udp(ip, port, "getkey")
+    elif args.cmd == "sink":
+        send_udp(ip, port, f"sink {args.sink_ip}")
+    elif args.cmd == "factoryreset":
+        send_udp(ip, port, "factoryreset")
     elif args.cmd == "writereg":
         send_udp(ip, port, f"writereg {args.reg} {args.val}")
     elif args.cmd == "synctime":

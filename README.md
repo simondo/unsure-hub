@@ -1,6 +1,6 @@
 # SureFlap ESP32-C5 Local Hub
 
-A **$7, 100% local replacement for the SureFlap / Sure Petcare Connect Hub** built on an **ESP32-C5** (dual-band 5 GHz Wi-Fi + IEEE 802.15.4) and a zero-dependency Python bridge for **Home Assistant**.
+A **$7, 100% local replacement for the SureFlap / Sure Petcare Connect Hub** built on an **ESP32-C5** (dual-band 5 GHz Wi-Fi + IEEE 802.15.4) and a lightweight Docker/Python bridge for **Home Assistant** (MQTT Auto-Discovery or REST).
 
 No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions — just direct 802.15.4 / MiWi communication between your ESP32-C5 and your SureFlap Microchip Pet Door / Cat Flap Connect.
 

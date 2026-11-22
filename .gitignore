@@ -6,7 +6,10 @@ firmware/managed_components/
 firmware/dependencies.lock
 firmware/main/secrets.h
 
-# Bridge runtime state, logs & config
+# Bridge runtime state, logs, config & built firmware artifacts
+bridge/data/
+bridge/firmware/*.bin
+bridge/firmware/ver.txt
 bridge/config.json
 bridge/state.json
 bridge/*.pcap
