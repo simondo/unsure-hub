@@ -1,8 +1,8 @@
 services:
   sureflap-bridge:
-    build: .
-    # Once published to GHCR, replace `build: .` with:
-    # image: ghcr.io/<your-github-username>/sureflap-esp32-hub:latest
+    image: ghcr.io/simondo/sureflap-esp32-hub:latest
+    # To build locally instead (e.g. after editing the bridge), comment out `image:` and use:
+    # build: .
     container_name: sureflap-bridge
     restart: unless-stopped
     network_mode: host
