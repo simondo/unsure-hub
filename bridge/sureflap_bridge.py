@@ -32,6 +32,7 @@ import socket
 import struct
 import threading
 import time
+import unicodedata
 import urllib.request
 from typing import Dict, Optional
 
@@ -43,6 +44,13 @@ except ImportError:
 LOCK_MODES = {0: "Unlocked", 1: "Keep In", 2: "Keep Out", 3: "Locked", 4: "Curfew"}
 LOCK_BY_NAME = {v.lower(): k for k, v in LOCK_MODES.items()}
 CURFEW_STATES = {1: "off", 2: "on", 3: "paused"}
+
+
+def _slug(name: str) -> str:
+    """Convert a pet display name (e.g. 'Mr Tibbs', 'Chloé') into a valid HA/MQTT slug."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "_", ascii_name.lower()).strip("_")
+    return slug or "pet"
 
 
 class SureFlapBridge:
@@ -78,6 +86,7 @@ class SureFlapBridge:
         self.fallback_lock = cf.get("lock_time", "18:30")
         self.fallback_unlock = cf.get("unlock_time", "06:00")
 
+        self._state_lock = threading.RLock()
         self.state = self._load_state()
         if not self.esp_ip and self.state.get("esp32_ip"):
             self.esp_ip = self.state["esp32_ip"]
@@ -117,7 +126,7 @@ class SureFlapBridge:
             "location": {},
             "since": {},
             "last_event": None,
-            "lock_mode": "Curfew",
+            "lock_mode": "Unknown",
             "battery": None,
             "curfew": None,
             "flap_curfew": None,
@@ -127,16 +136,17 @@ class SureFlapBridge:
         }
 
     def _save_state(self) -> None:
-        self.state["sessions"] = {
-            h: {str(i): v for i, v in sorted(kd.items())}
-            for h, kd in self.sessions.items()
-        }
-        self.state["chk12"] = self.chk12
-        self.state["active_hdr"] = self.active_hdr
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.state, f, indent=2)
-        os.replace(tmp, self.state_path)
+        with self._state_lock:
+            self.state["sessions"] = {
+                h: {str(i): v for i, v in sorted(kd.items())}
+                for h, kd in self.sessions.items()
+            }
+            self.state["chk12"] = self.chk12
+            self.state["active_hdr"] = self.active_hdr
+            tmp = self.state_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.state, f, indent=2)
+            os.replace(tmp, self.state_path)
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%H:%M:%S')} {msg}"
@@ -264,7 +274,7 @@ class SureFlapBridge:
             }),
         ]
         for pet in self.pets.values():
-            pl = pet.lower()
+            pl = _slug(pet)
             configs.append((f"{dp}/sensor/sureflap_pet_{pl}/config", {
                 "name": pet,
                 "unique_id": f"sureflap_catflap_{pl}",
@@ -332,7 +342,7 @@ class SureFlapBridge:
             elif topic.startswith(f"{self.mqtt_prefix}/pet/") and topic.endswith("/flip"):
                 pl = topic.split("/")[-2].lower()
                 for pet in self.pets.values():
-                    if pet.lower() == pl:
+                    if _slug(pet) == pl:
                         self._flip_pet(pet)
                         break
             elif topic == f"{self.mqtt_discovery_prefix}/status" and payload == "online":
@@ -347,15 +357,16 @@ class SureFlapBridge:
         self.mqtt_client = client
 
     def _push_pet(self, pet: str, loc: str, since_t: Optional[str], inferred: bool = False) -> None:
+        pl = _slug(pet)
         attrs = {
             "since": since_t,
             "friendly_name": pet,
             "inferred": inferred,
             "icon": "mdi:cat" if loc == "inside" else "mdi:tree",
         }
-        self._mqtt_pub(f"pet/{pet.lower()}/state", loc, retain=True)
-        self._mqtt_pub(f"pet/{pet.lower()}/attrs", attrs, retain=True)
-        self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {"state": loc, "attributes": attrs})
+        self._mqtt_pub(f"pet/{pl}/state", loc, retain=True)
+        self._mqtt_pub(f"pet/{pl}/attrs", attrs, retain=True)
+        self.ha_post(f"/api/states/sensor.catflap_{pl}", {"state": loc, "attributes": attrs})
 
     # ---- Home Assistant REST helpers ----
 
@@ -483,7 +494,8 @@ class SureFlapBridge:
 
         # Optional 1-tap manual flip buttons (input_button.catflap_flip_<pet>)
         for pet in self.pets.values():
-            eid = f"input_button.catflap_flip_{pet.lower()}"
+            pl = _slug(pet)
+            eid = f"input_button.catflap_flip_{pl}"
             bst = self.ha_get(f"/api/states/{eid}")
             if not bst or "state" not in bst:
                 continue
@@ -492,23 +504,7 @@ class SureFlapBridge:
                 self.last_flip_ts[eid] = ts
             elif ts != self.last_flip_ts[eid] and ts not in ("unknown", "unavailable"):
                 self.last_flip_ts[eid] = ts
-                loc = self.state.setdefault("location", {})
-                since = self.state.setdefault("since", {})
-                new_loc = "outside" if loc.get(pet) == "inside" else "inside"
-                t = time.strftime("%H:%M:%S")
-                loc[pet] = new_loc
-                since[pet] = t
-                self._save_state()
-                self.log(f"MANUAL FLIP: {pet} -> {new_loc}")
-                self.ha_post(f"/api/states/sensor.catflap_{pet.lower()}", {
-                    "state": new_loc,
-                    "attributes": {
-                        "since": t,
-                        "friendly_name": pet,
-                        "inferred": False,
-                        "icon": "mdi:cat" if new_loc == "inside" else "mdi:tree",
-                    },
-                })
+                self._flip_pet(pet)
 
     # ---- Protocol decoding & keystream auto-learning ----
 
@@ -559,11 +555,23 @@ class SureFlapBridge:
             k[8] = b[8]
             changed = True
         if len(b) == 24:
-            # 24B movement trigger is always reg 1024 (0x0400), rlen = 13, byte 11=HH, byte 12=MM
+            # 24B movement trigger is always reg 1024 (0x0400), rlen = 13, byte 11=HH, byte 12=MM.
+            # If k[11] or k[12] were previously learned with a wrong TZ/drifted clock and now decode
+            # to an impossible time (HH>=24 or MM>=60), re-learn them and re-solve k[10].
+            relearn_clock = (
+                (11 in k and (b[11] ^ k[11]) >= 24)
+                or (12 in k and (b[12] ^ k[12]) >= 60)
+            )
             for idx, plain in ((6, 0x04), (7, 0x00), (9, 13), (11, int(t[:2])), (12, int(t[3:5]))):
-                if idx not in k:
+                if idx not in k or (relearn_clock and idx in (11, 12)):
                     k[idx] = b[idx] ^ plain
                     changed = True
+            if relearn_clock and hdr in self.chk12 and all(i in k for i in (4, 5, 6, 7, 8, 9, 11)):
+                kx = self.chk12[hdr] ^ 0x2C
+                for i in (4, 5, 6, 7, 8, 9, 11):
+                    kx ^= k[i]
+                k[10] = kx
+                changed = True
         if len(b) == 12:
             xr = 0
             for v in b[4:]:
@@ -620,8 +628,10 @@ class SureFlapBridge:
             self.last24_dir = (b[13] ^ k[13]) if 13 in k else None
             return
 
-        # 5s dedup per body
+        # 5s dedup per body (prune stale entries to bound memory)
         now = time.time()
+        if len(self.seen_dedup) > 64:
+            self.seen_dedup = {body: ts for body, ts in self.seen_dedup.items() if (now - ts) < 60.0}
         if (now - self.seen_dedup.get(b[4:], -999)) < 5.0:
             return
         self.seen_dedup[b[4:]] = now

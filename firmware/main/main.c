@@ -994,6 +994,29 @@ static void boot_ota_check(void)
     if (n > 0 && strcmp(v, mine)) ota_pull(g_cfg.sink_ip, g_cfg.ota_port, "/sureflap_hub.bin", true);
 }
 
+static const char *parse_token(const char *p, char *out, size_t max_len)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) { out[0] = '\0'; return NULL; }
+    size_t i = 0;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"') {
+            if (*p == '\\' && p[1]) p++;
+            if (i + 1 < max_len) out[i++] = *p;
+            p++;
+        }
+        if (*p == '"') p++;
+    } else {
+        while (*p && *p != ' ' && *p != '\t') {
+            if (i + 1 < max_len) out[i++] = *p;
+            p++;
+        }
+    }
+    out[i] = '\0';
+    return p;
+}
+
 static void ctrl_task(void *a)
 {
     int s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -1101,7 +1124,9 @@ static void ctrl_task(void *a)
                 }
             } else if (!strncmp(b, "wifi ", 5)) {
                 char ssid[33] = "", pass[65] = "";
-                if (sscanf(b + 5, "%32s %64s", ssid, pass) >= 1) {
+                const char *rest = parse_token(b + 5, ssid, sizeof ssid);
+                if (rest && ssid[0]) {
+                    parse_token(rest, pass, sizeof pass);
                     strncpy(g_cfg.wifi5_ssid, ssid, sizeof(g_cfg.wifi5_ssid) - 1);
                     strncpy(g_cfg.wifi5_pass, pass, sizeof(g_cfg.wifi5_pass) - 1);
                     strncpy(g_cfg.wifi2_ssid, ssid, sizeof(g_cfg.wifi2_ssid) - 1);

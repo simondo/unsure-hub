@@ -9,7 +9,8 @@ services:
     volumes:
       - ./data:/data
     environment:
-      - TZ=Europe/London
+      # Set to your local timezone so auto-learned keystream matches the flap's clock (e.g. Europe/London, America/New_York)
+      - TZ=${TZ:-UTC}
       - SUREFLAP_CONFIG=/data/config.json
       - STATE_FILE=/data/state.json
       - OTA_DIR=/data/ota

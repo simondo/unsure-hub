@@ -203,6 +203,26 @@ class TestKeystreamAutoLearning(BridgeTestBase):
         self.assertEqual(saved["active_hdr"], TEST_HDR)
         self.assertEqual(saved["sessions"][TEST_HDR]["10"], TEST_KEY[10])
 
+    def test_relearns_clock_key_bytes_when_previously_corrupt(self):
+        bridge = self.make_bridge(preload_key=True)
+        raw12 = encrypt_frame(TEST_HDR, make_12b_reg36(0), TEST_KEY)
+        chk12 = 0
+        for v in raw12[4:]:
+            chk12 ^= v
+        bridge.chk12[TEST_HDR] = chk12
+        # Corrupt k[11] and k[12] so 14:25 decodes to impossible >=24 / >=60 values
+        bridge.sessions[TEST_HDR][11] = TEST_KEY[11] ^ 0x40
+        bridge.sessions[TEST_HDR][12] = TEST_KEY[12] ^ 0x40
+        bridge.sessions[TEST_HDR][10] = 0x00
+
+        raw24 = encrypt_frame(TEST_HDR, make_24b_movement(14, 25, 0x61), TEST_KEY)
+        with patch("sureflap_bridge.time.strftime", return_value="14:25:00"):
+            bridge.handle_stat_line(stat_line(raw24))
+
+        self.assertEqual(bridge.sessions[TEST_HDR][11], TEST_KEY[11])
+        self.assertEqual(bridge.sessions[TEST_HDR][12], TEST_KEY[12])
+        self.assertEqual(bridge.sessions[TEST_HDR][10], TEST_KEY[10])
+
 
 class TestProtocolDecoding(BridgeTestBase):
     def test_reg36_lock_mode_and_5s_dedup(self):
@@ -223,6 +243,16 @@ class TestProtocolDecoding(BridgeTestBase):
         with patch("sureflap_bridge.time.time", return_value=1006.0):
             bridge.handle_stat_line(stat_line(raw))
         self.assertGreater(bridge.ha_post.call_count, first_calls)
+
+    def test_seen_dedup_prunes_stale_entries(self):
+        bridge = self.make_bridge()
+        # Seed 70 stale entries at t=0
+        for i in range(70):
+            bridge.seen_dedup[bytes([i])] = 0.0
+        raw = encrypt_frame(TEST_HDR, make_12b_reg36(0), TEST_KEY)
+        with patch("sureflap_bridge.time.time", return_value=200.0):
+            bridge.handle_stat_line(stat_line(raw))
+        self.assertEqual(len(bridge.seen_dedup), 1)
 
     def test_reg33_battery_and_clock_high_bit_masking(self):
         bridge = self.make_bridge()
@@ -392,6 +422,40 @@ class TestPetStateMachine(BridgeTestBase):
 
 
 class TestMqttAndConfig(BridgeTestBase):
+    def test_initial_lock_mode_is_unknown_and_pet_slugs_are_sanitized(self):
+        bridge = self.make_bridge(pets={"1": "Mr Tibbs", "2": "Chloé"})
+        self.assertEqual(bridge.state["lock_mode"], "Unknown")
+        self.assertEqual(sb._slug("Mr Tibbs"), "mr_tibbs")
+        self.assertEqual(sb._slug("Chloé"), "chloe")
+
+        published = []
+        mock_mqtt = MagicMock()
+        mock_mqtt.publish.side_effect = lambda topic, data, qos=1, retain=True: published.append((topic, data, retain))
+        bridge.mqtt_client = mock_mqtt
+        bridge._publish_mqtt_discovery()
+        topics = {t for t, _, _ in published}
+        self.assertIn("homeassistant/sensor/sureflap_pet_mr_tibbs/config", topics)
+        self.assertIn("homeassistant/button/sureflap_flip_chloe/config", topics)
+
+    def test_save_state_is_thread_safe(self):
+        import threading
+        bridge = self.make_bridge()
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(25):
+                    bridge._save_state()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+
     def test_mqtt_discovery_and_lock_command(self):
         bridge = self.make_bridge()
         published = []
