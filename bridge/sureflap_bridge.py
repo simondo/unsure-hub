@@ -144,6 +144,23 @@ class SureFlapBridge:
         if self.log_fp:
             self.log_fp.write(line + "\n")
 
+    def _local_ip_for_esp(self) -> Optional[str]:
+        """Return this host's LAN IPv4 address on the route to the ESP32-C5."""
+        explicit = self.cfg.get("bridge_ip", "").strip()
+        if explicit:
+            return explicit
+        if not self.esp_ip:
+            return None
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((self.esp_ip, self.esp_port))
+                ip = s.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+        except OSError:
+            pass
+        return None
+
     def send_esp(self, cmd: str) -> None:
         if not self.esp_ip:
             self.log(f"UDP skipped (ESP32 IP not configured/discovered yet): {cmd}")
@@ -823,7 +840,22 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
 
             def do_POST(self):
                 if self.path.split("?")[0] == "/api/ota":
-                    host = self.headers.get("Host", "").split(":")[0] or "127.0.0.1"
+                    host = bridge._local_ip_for_esp()
+                    if not host:
+                        hdr_host = self.headers.get("Host", "").split(":")[0].strip()
+                        try:
+                            socket.inet_aton(hdr_host)
+                            if not hdr_host.startswith("127."):
+                                host = hdr_host
+                        except OSError:
+                            pass
+                    if not host:
+                        self._send_bytes(
+                            503,
+                            "text/plain; charset=utf-8",
+                            b"Cannot determine bridge LAN IPv4 for OTA; set bridge_ip or BRIDGE_IP.\n",
+                        )
+                        return
                     fname = "sureflap_hub.bin" if find_fw("sureflap_hub.bin") else "c5_sniffer.bin"
                     bridge.send_esp(f"ota http://{host}:{ota_port}/{fname}")
                     self.send_response(303)
@@ -901,6 +933,8 @@ def _load_config(path: str) -> dict:
     # Allow pure environment-variable configuration for zero-file Docker deployments
     if os.environ.get("ESP32_IP"):
         cfg["esp32_ip"] = os.environ["ESP32_IP"]
+    if os.environ.get("BRIDGE_IP"):
+        cfg["bridge_ip"] = os.environ["BRIDGE_IP"]
     if os.environ.get("STATE_FILE"):
         cfg["state_file"] = os.environ["STATE_FILE"]
     if os.environ.get("LOG_FILE"):

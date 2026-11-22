@@ -517,11 +517,19 @@ class TestWebFlasherAndOtaServer(BridgeTestBase):
         status, _, _ = req("GET", "/does_not_exist.bin")
         self.assertEqual(status, 404)
 
-        # POST /api/ota triggers UDP ota command and redirects to /
-        status, hdrs, _ = req("POST", "/api/ota", headers={"Host": f"127.0.0.1:{port}"})
+        # POST /api/ota with hostname Host header (e.g. nas.lan or localhost) must still use
+        # the bridge's LAN IPv4 address (not the browser Host header) so the ESP32 accepts it.
+        bridge._local_ip_for_esp = lambda: "192.0.2.50"
+        status, hdrs, _ = req("POST", "/api/ota", headers={"Host": f"nas.lan:{port}"})
         self.assertEqual(status, 303)
         self.assertEqual(hdrs.get("Location"), "/")
-        self.assertEqual(bridge.sent_udp, [f"ota http://127.0.0.1:{port}/sureflap_hub.bin"])
+        self.assertEqual(bridge.sent_udp, [f"ota http://192.0.2.50:{port}/sureflap_hub.bin"])
+
+        # POST /api/ota with localhost and unresolvable local IP returns 503 instead of sending broken localhost URL
+        bridge._local_ip_for_esp = lambda: None
+        status, _, _ = req("POST", "/api/ota", headers={"Host": f"localhost:{port}"})
+        self.assertEqual(status, 503)
+        self.assertEqual(len(bridge.sent_udp), 1)
 
 
 if __name__ == "__main__":
