@@ -1176,6 +1176,7 @@ static void wd_task(void *a)
             hub_log("boot-crumbs ", prev_crumb, 4);
             hub_log("prev-wifi-disc ", prev_disc, 2);
             hub_log_str("band ", use5g ? "5GHz" : "2.4GHz");
+            hub_log_str("ver ", esp_app_get_description()->version);
             log_key_state();
         }
         static uint32_t last_hb;

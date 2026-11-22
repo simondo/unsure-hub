@@ -97,6 +97,22 @@ With MQTT Auto-Discovery enabled, all entities (`sensor.catflap_*`, `select.catf
 
 ---
 
+## Troubleshooting
+
+* **Web Flasher button won't open USB / "Web Serial not supported":** Browsers only allow Web Serial over `http://localhost:8000` or HTTPS. On a plain HTTP LAN URL (`http://<server-ip>:8000`), flash directly through the container instead:
+  ```bash
+  docker exec -it sureflap-bridge esptool.py --chip esp32c5 write_flash 0x0 /app/firmware/sureflap_hub_merged.bin
+  ```
+* **Mistyped Wi-Fi password or can't reach the ESP32:** After 3 failed Wi-Fi boot cycles (2× 5 GHz + 1× 2.4 GHz, ~6 minutes), the ESP32 automatically re-opens the `SureFlap-Hub-Setup` AP for 5 minutes so you can fix credentials from a phone without USB.
+* **Flap won't pair:** Make sure the official SureFlap Hub is unplugged, the ESP32 logs `802.15.4 started on ch 15 PAN 0x3421`, and press the flap's cog/pairing button (or remove and re-insert its batteries).
+* **Lock commands fail with `"session key not verified yet"` or logs say `"Holding setkey"`:** By design, the bridge waits to confirm the flap's clock across an even and odd hour (at most 1 hour via the hourly battery/clock frame) before enabling writes, so a wrong timezone or drifted clock can never flip a lock mode. Verify `TZ` in `docker-compose.yml` matches your flap's local time, and run `./bridge/flapctl.py synctime` once verified.
+* **Lock commands confirm in HA, but the physical pins don't move:** Make sure the flap's physical rotary dial is in **Position 1 (Unlocked)** — other dial positions override wireless lock commands. Also check battery voltage (below `4.9 V` the motor can stall).
+* **Entries work, but exits are never detected:** Some Connect units emit `0x61` for both entries and normal-speed exits (`0x40` for peeks, `reg 621` only for fast unchipped exits). Enable `TOGGLE_ON_IN=true` (or `"toggle_on_in": true`) so `0x61` toggles `inside ↔ outside` while unlocked and forces `in` during Curfew / Keep In / Locked. Use the auto-discovered `button.catflap_flip_<pet>` buttons for 1-tap manual corrections.
+* **Duplicate `_2` sensors in Home Assistant:** Usually caused by an old REST script and the MQTT bridge running together at HA startup. Stop the legacy script, remove the stale entities in HA (**Settings → Devices & services → Entities**), and restart the bridge container.
+* **Curfew or clock stopped working after changing batteries:** Removing the 4× C-cell batteries resets the flap's internal clock and onboard curfew schedule. Re-sync with `./bridge/flapctl.py synctime` and `./bridge/flapctl.py curfew 18:30 06:00 --enable`.
+
+---
+
 ## Returning to the Official SureFlap Hub
 
 Your flap's learned pet microchips are stored inside the flap itself, so switching back takes under a minute:

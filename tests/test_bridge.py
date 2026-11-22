@@ -616,6 +616,8 @@ class TestWebFlasherAndOtaServer(BridgeTestBase):
             "firmware_dir": fw_dir,
             "ota_port": port,
         })
+        bridge.handle_stat_line("HUB ver 1.0.0-running")
+        self.assertEqual(bridge.state["esp_fw_ver"], "1.0.0-running")
         bridge._start_ota_server()
         self.addCleanup(bridge.ota_server.server_close)
         self.addCleanup(bridge.ota_server.shutdown)
@@ -630,12 +632,13 @@ class TestWebFlasherAndOtaServer(BridgeTestBase):
             finally:
                 c.close()
 
-        # GET / returns Web Flasher UI with version
+        # GET / returns Web Flasher UI with available version AND running ESP32 version
         status, _, raw_body = req("GET", "/")
         body = raw_body.decode()
         self.assertEqual(status, 200)
         self.assertIn("esp-web-install-button", body)
         self.assertIn("1.2.3-test", body)
+        self.assertIn("1.0.0-running", body)
 
         # GET /manifest.json returns valid ESP Web Tools manifest for ESP32-C5
         status, _, raw_body = req("GET", "/manifest.json")

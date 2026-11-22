@@ -698,6 +698,13 @@ class SureFlapBridge:
             err = line.split("cmd-err ", 1)[1].strip() or "esp32 error"
             self._fail_lock_cmd(err)
             return
+        m_ver = re.search(r"\bHUB (?:ver|ota-current|ota-newer|ota-nocontact) (\S+)", line)
+        if m_ver:
+            ver = m_ver.group(1)
+            if self.state.get("esp_fw_ver") != ver:
+                self.state["esp_fw_ver"] = ver
+                self._save_state()
+            return
         if "txcmd-ack" in line:
             self.cmd_status = "acked"
             self.push_lock_sensor()
@@ -885,6 +892,7 @@ class SureFlapBridge:
                     batt = bridge.state.get("battery") or {}
                     batt_str = f"{batt.get('volts', '?')} V ({batt.get('pct', '?')}%)" if batt else "waiting..."
                     esp_ip_esc = html.escape(bridge.esp_ip or "waiting for ESP32...")
+                    esp_ver_esc = html.escape(str(bridge.state.get("esp_fw_ver") or "unknown"))
                     hdr_esc = html.escape(bridge.active_hdr or "learning...")
                     lock_esc = html.escape(str(bridge.state.get("lock_mode", "Unknown")))
                     curf_esc = html.escape(str(bridge.state.get("flap_curfew", "unknown")))
@@ -917,7 +925,7 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
 </style></head><body>
 <h1>SureFlap ESP32-C5 Local Hub</h1>
 <div class='card'><h2>Live Status</h2><ul>
-<li><b>ESP32-C5 IP:</b> <code>{esp_ip_esc}</code> · <b>Session:</b> <code>{hdr_esc}</code></li>
+<li><b>ESP32-C5 IP:</b> <code>{esp_ip_esc}</code> · <b>Running FW:</b> <code>{esp_ver_esc}</code> · <b>Session:</b> <code>{hdr_esc}</code></li>
 <li><b>Lock mode:</b> {lock_esc} · <b>Curfew:</b> {curf_esc}</li>
 <li><b>Battery:</b> {batt_str}</li>
 {pets_html}

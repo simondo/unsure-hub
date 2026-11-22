@@ -1,0 +1,57 @@
+name: Bug Report
+description: Report a bug with the ESP32-C5 firmware, bridge, or Home Assistant integration
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out the details below so we can reproduce the issue.
+        **Remember to redact Wi-Fi passwords, HA tokens, and personal IPs before posting.**
+
+  - type: dropdown
+    id: flap_model
+    attributes:
+      label: SureFlap Device Model
+      options:
+        - SureFlap Microchip Cat Flap Connect
+        - SureFlap Microchip Pet Door Connect (DualScan)
+        - SureFlap Microchip Pet Feeder Connect
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: fw_version
+    attributes:
+      label: ESP32-C5 Board & Running Firmware Version
+      description: Shown on the bridge status page (http://<server>:8000/)
+      placeholder: "e.g. ESP32-C5-DevKitC-1, 1.0.0-abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Bridge Deployment & HA Transport
+      options:
+        - Docker + MQTT Auto-Discovery
+        - Docker + Home Assistant REST API
+        - Native Python + MQTT Auto-Discovery
+        - Native Python + Home Assistant REST API
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the expected behavior and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Bridge Logs
+      description: Paste output from `docker logs --tail 100 sureflap-bridge` (with any secrets removed).
+      render: text
