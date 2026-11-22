@@ -163,15 +163,16 @@ class BridgeTestBase(unittest.TestCase):
         bridge.ha_get = MagicMock(return_value=None)
         if preload_key:
             bridge.sessions[TEST_HDR] = dict(TEST_KEY)
+            bridge.key_verified[TEST_HDR] = True
             bridge.active_hdr = TEST_HDR
         return bridge
 
 
 class TestKeystreamAutoLearning(BridgeTestBase):
-    def test_learns_full_keystream_and_pushes_setkey(self):
+    def test_learns_full_keystream_and_pushes_setkey_after_parity_verification(self):
         bridge = self.make_bridge(preload_key=False)
 
-        # 1) 24B movement trigger at 14:25 teaches k[4..9], k[11], k[12]
+        # 1) 24B movement trigger at 14:25 (even hour) teaches k[4..9], k[11], k[12]
         raw24 = encrypt_frame(TEST_HDR, make_24b_movement(14, 25, 0x61), TEST_KEY)
         with patch("sureflap_bridge.time.strftime", return_value="14:25:00"):
             bridge.handle_stat_line(stat_line(raw24))
@@ -180,17 +181,25 @@ class TestKeystreamAutoLearning(BridgeTestBase):
         for idx in (4, 5, 6, 7, 8, 9, 11, 12):
             self.assertEqual(learned[idx], TEST_KEY[idx], f"mismatch at k[{idx}]")
         self.assertNotIn(10, learned)
-        self.assertEqual(bridge.sent_udp, [])  # not ready until k[10] + chk12 are solved
+        self.assertEqual(bridge.sent_udp, [])
 
-        # 2) 12B reg 36 frame teaches chk12 and solves k[10] via XOR(plain[4..11]) == 0x2c
+        # 2) 12B reg 36 frame teaches chk12 and solves k[10], but setkey is HELD until
+        #    k[11] is verified across both an even and an odd hour.
         raw12 = encrypt_frame(TEST_HDR, make_12b_reg36(1), TEST_KEY)
         with patch("sureflap_bridge.time.strftime", return_value="14:25:10"):
             bridge.handle_stat_line(stat_line(raw12))
 
         self.assertEqual(bridge.sessions[TEST_HDR][10], TEST_KEY[10])
         self.assertEqual(bridge.state["lock_mode"], "Keep In")
-        self.assertEqual(bridge.cmd_status, "confirmed")
+        self.assertFalse(bridge.key_verified.get(TEST_HDR))
+        self.assertEqual(bridge.sent_udp, [])
 
+        # 3) Hourly reg 33 battery+clock frame in an odd hour (15:10) verifies k[11] -> pushes setkey
+        raw33 = encrypt_frame(TEST_HDR, make_14b_battery(160, 15, 10), TEST_KEY)
+        with patch("sureflap_bridge.time.strftime", return_value="15:10:00"):
+            bridge.handle_stat_line(stat_line(raw33))
+
+        self.assertTrue(bridge.key_verified.get(TEST_HDR))
         expected_khex = bytes(TEST_KEY[i] for i in range(4, 12)).hex()
         expected_chk12 = 0
         for v in raw12[4:]:
@@ -202,15 +211,45 @@ class TestKeystreamAutoLearning(BridgeTestBase):
             saved = json.load(f)
         self.assertEqual(saved["active_hdr"], TEST_HDR)
         self.assertEqual(saved["sessions"][TEST_HDR]["10"], TEST_KEY[10])
+        self.assertTrue(saved["key_verified"][TEST_HDR])
+
+    def test_skips_clock_learning_near_top_of_hour(self):
+        bridge = self.make_bridge(preload_key=False)
+        for t_str, hr, mn in (("14:01:00", 14, 1), ("14:58:30", 14, 58)):
+            raw24 = encrypt_frame(TEST_HDR, make_24b_movement(hr, mn, 0x61), TEST_KEY)
+            with patch("sureflap_bridge.time.strftime", return_value=t_str):
+                bridge.handle_stat_line(stat_line(raw24))
+        self.assertNotIn(11, bridge.sessions[TEST_HDR])
+        self.assertNotIn(12, bridge.sessions[TEST_HDR])
+
+    def test_one_hour_timezone_mismatch_is_caught_and_refuses_setkey(self):
+        bridge = self.make_bridge(preload_key=False)
+        # Flap clock is 14:25 while host (wrong TZ) thinks it is 15:25
+        raw24_a = encrypt_frame(TEST_HDR, make_24b_movement(14, 25, 0x61), TEST_KEY)
+        with patch("sureflap_bridge.time.strftime", return_value="15:25:00"):
+            bridge.handle_stat_line(stat_line(raw24_a))
+        raw12 = encrypt_frame(TEST_HDR, make_12b_reg36(1), TEST_KEY)
+        with patch("sureflap_bridge.time.strftime", return_value="15:25:10"):
+            bridge.handle_stat_line(stat_line(raw12))
+
+        # One hour later: flap is 15:10, host is 16:10 -> XOR diff changes (1 vs 31),
+        # so mismatch is detected and setkey is NEVER sent.
+        raw33_b = encrypt_frame(TEST_HDR, make_14b_battery(160, 15, 10), TEST_KEY)
+        with patch("sureflap_bridge.time.strftime", return_value="16:10:00"):
+            bridge.handle_stat_line(stat_line(raw33_b))
+
+        self.assertFalse(bridge.key_verified.get(TEST_HDR))
+        self.assertEqual(bridge.sent_udp, [])
 
     def test_relearns_clock_key_bytes_when_previously_corrupt(self):
         bridge = self.make_bridge(preload_key=True)
+        bridge.key_verified[TEST_HDR] = False
         raw12 = encrypt_frame(TEST_HDR, make_12b_reg36(0), TEST_KEY)
         chk12 = 0
         for v in raw12[4:]:
             chk12 ^= v
         bridge.chk12[TEST_HDR] = chk12
-        # Corrupt k[11] and k[12] so 14:25 decodes to impossible >=24 / >=60 values
+        # Corrupt k[11] and k[12] so 14:25 decodes wrong
         bridge.sessions[TEST_HDR][11] = TEST_KEY[11] ^ 0x40
         bridge.sessions[TEST_HDR][12] = TEST_KEY[12] ^ 0x40
         bridge.sessions[TEST_HDR][10] = 0x00
@@ -222,6 +261,7 @@ class TestKeystreamAutoLearning(BridgeTestBase):
         self.assertEqual(bridge.sessions[TEST_HDR][11], TEST_KEY[11])
         self.assertEqual(bridge.sessions[TEST_HDR][12], TEST_KEY[12])
         self.assertEqual(bridge.sessions[TEST_HDR][10], TEST_KEY[10])
+        self.assertFalse(bridge.key_verified.get(TEST_HDR))
 
 
 class TestProtocolDecoding(BridgeTestBase):

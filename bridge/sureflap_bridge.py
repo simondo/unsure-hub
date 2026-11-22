@@ -97,6 +97,13 @@ class SureFlapBridge:
         self.chk12: Dict[str, int] = {
             h: int(v) for h, v in self.state.get("chk12", {}).items()
         }
+        self.key_hours: Dict[str, list] = {
+            h: [int(x) for x in hrs] for h, hrs in self.state.get("key_hours", {}).items()
+        }
+        self.key_verified: Dict[str, bool] = {
+            h: bool(v) for h, v in self.state.get("key_verified", {}).items()
+        }
+        self.allow_unverified_key: bool = bool(cfg.get("allow_unverified_key", False))
         self.active_hdr: Optional[str] = self.state.get("active_hdr")
         self.seen_dedup: Dict[bytes, float] = {}
         self.last24_time: Optional[str] = None
@@ -132,6 +139,8 @@ class SureFlapBridge:
             "flap_curfew": None,
             "sessions": {},
             "chk12": {},
+            "key_hours": {},
+            "key_verified": {},
             "active_hdr": None,
         }
 
@@ -142,6 +151,8 @@ class SureFlapBridge:
                 for h, kd in self.sessions.items()
             }
             self.state["chk12"] = self.chk12
+            self.state["key_hours"] = self.key_hours
+            self.state["key_verified"] = self.key_verified
             self.state["active_hdr"] = self.active_hdr
             tmp = self.state_path + ".tmp"
             with open(tmp, "w") as f:
@@ -192,6 +203,12 @@ class SureFlapBridge:
         k = self.sessions.get(hdr, {})
         c12 = self.chk12.get(hdr)
         if c12 is None or not all(i in k for i in range(4, 12)):
+            return
+        if not self.key_verified.get(hdr) and not self.allow_unverified_key:
+            self.log(
+                f"Holding setkey for session {hdr} until clock key k[11] is verified across "
+                f"an even and odd hour (observed hours={self.key_hours.get(hdr, [])})"
+            )
             return
         khex = bytes(k[i] for i in range(4, 12)).hex()
         self.send_esp(f"setkey {hdr} {khex} {c12:02x}")
@@ -546,6 +563,53 @@ class SureFlapBridge:
         if pet != "unknown" and direction in ("in", "out"):
             self._push_pet(pet, loc.get(pet, "unknown"), t, inferred=inferred)
 
+    def _observe_clock_key(self, hdr: str, k: Dict[int, int], b: bytes, t: str) -> bool:
+        """Learn or cross-check k[11]/k[12] from a frame whose bytes 11..12 are HH:MM.
+
+        Skips frames within 2 minutes of the top of the hour to avoid clock-drift mismatches.
+        Marks the session key verified only after k[11] agrees across both an even and an odd
+        host hour, which mathematically detects any ±1 hour timezone/DST/drift offset.
+        """
+        hr, mn = int(t[:2]), int(t[3:5])
+        if mn < 2 or mn >= 58:
+            return False
+        if self.key_verified.get(hdr) and 11 in k and 12 in k:
+            return False
+        cand_k11 = b[11] ^ hr
+        cand_k12 = b[12] ^ mn
+        if 11 not in k:
+            k[11] = cand_k11
+            k[12] = cand_k12
+            self.key_hours[hdr] = [hr]
+            self.key_verified[hdr] = False
+            return True
+        if k[11] == cand_k11:
+            hrs = self.key_hours.setdefault(hdr, [])
+            changed = False
+            if hr not in hrs:
+                hrs.append(hr)
+                changed = True
+            if not self.key_verified.get(hdr) and len({h % 2 for h in hrs}) >= 2:
+                self.key_verified[hdr] = True
+                self.log(f"Verified session {hdr} clock key across hours {hrs}")
+                changed = True
+            return changed
+        # Mismatch: previous k[11] does not agree with this hour (wrong TZ or drifted clock)
+        self.log(
+            f"WARNING: Session {hdr} clock key mismatch at {t[:5]} — "
+            f"refusing writes until verified (check TZ and run flapctl.py synctime)"
+        )
+        k[11] = cand_k11
+        k[12] = cand_k12
+        self.key_hours[hdr] = [hr]
+        self.key_verified[hdr] = False
+        if hdr in self.chk12 and all(i in k for i in (4, 5, 6, 7, 8, 9, 11)):
+            kx = self.chk12[hdr] ^ 0x2C
+            for i in (4, 5, 6, 7, 8, 9, 11):
+                kx ^= k[i]
+            k[10] = kx
+        return True
+
     def _learn_key(self, hdr: str, b: bytes, t: str) -> Optional[Dict[int, int]]:
         k = self.sessions.setdefault(hdr, {})
         changed = False
@@ -556,21 +620,11 @@ class SureFlapBridge:
             changed = True
         if len(b) == 24:
             # 24B movement trigger is always reg 1024 (0x0400), rlen = 13, byte 11=HH, byte 12=MM.
-            # If k[11] or k[12] were previously learned with a wrong TZ/drifted clock and now decode
-            # to an impossible time (HH>=24 or MM>=60), re-learn them and re-solve k[10].
-            relearn_clock = (
-                (11 in k and (b[11] ^ k[11]) >= 24)
-                or (12 in k and (b[12] ^ k[12]) >= 60)
-            )
-            for idx, plain in ((6, 0x04), (7, 0x00), (9, 13), (11, int(t[:2])), (12, int(t[3:5]))):
-                if idx not in k or (relearn_clock and idx in (11, 12)):
+            for idx, plain in ((6, 0x04), (7, 0x00), (9, 13)):
+                if idx not in k:
                     k[idx] = b[idx] ^ plain
                     changed = True
-            if relearn_clock and hdr in self.chk12 and all(i in k for i in (4, 5, 6, 7, 8, 9, 11)):
-                kx = self.chk12[hdr] ^ 0x2C
-                for i in (4, 5, 6, 7, 8, 9, 11):
-                    kx ^= k[i]
-                k[10] = kx
+            if self._observe_clock_key(hdr, k, b, t):
                 changed = True
         if len(b) == 12:
             xr = 0
@@ -579,18 +633,31 @@ class SureFlapBridge:
             if self.chk12.get(hdr) != xr:
                 self.chk12[hdr] = xr
                 changed = True
-            # If k[4..9] and k[11] are known, solve k[10] from XOR(plain[4..11]) == 0x2c
-            if all(i in k for i in (4, 5, 6, 7, 8, 9, 11)) and 10 not in k:
-                # k[10] = XOR(k[4..9], k[11]) ^ chk12 ^ 0x2c
-                kx = xr ^ 0x2C
-                for i in (4, 5, 6, 7, 8, 9, 11):
-                    kx ^= k[i]
+        # Cross-check k[11] against reg 33 (hourly battery + clock) once reg/rlen keys are known
+        if len(b) in (14, 16) and all(i in k for i in (6, 7, 9)):
+            reg = ((b[6] ^ k[6]) << 8) | (b[7] ^ k[7])
+            rlen = b[9] ^ k[9]
+            if reg == 33 and rlen in (3, 5):
+                # Mask off high bit on minute byte before clock observation
+                b_clock = bytearray(b)
+                b_clock[12] = ((b[12] ^ k[12]) & 0x7F) ^ k[12] if 12 in k else b[12]
+                if self._observe_clock_key(hdr, k, bytes(b_clock), t):
+                    changed = True
+        # Solve k[10] from XOR(plain[4..11]) == 0x2c whenever chk12 and k[4..9, 11] are known
+        if hdr in self.chk12 and all(i in k for i in (4, 5, 6, 7, 8, 9, 11)):
+            kx = self.chk12[hdr] ^ 0x2C
+            for i in (4, 5, 6, 7, 8, 9, 11):
+                kx ^= k[i]
+            if k.get(10) != kx:
                 k[10] = kx
                 changed = True
         if changed:
             self.active_hdr = hdr
             self._save_state()
-            self.log(f"Learned session {hdr}: keys={sorted(k.keys())} chk12={self.chk12.get(hdr)}")
+            self.log(
+                f"Learned session {hdr}: keys={sorted(k.keys())} "
+                f"chk12={self.chk12.get(hdr)} verified={self.key_verified.get(hdr, False)}"
+            )
             self.push_key_to_esp(hdr)
         return k if all(i in k for i in (4, 5, 6, 7, 8, 9)) else None
 

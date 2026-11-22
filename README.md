@@ -62,7 +62,8 @@ With **MQTT Auto-Discovery** enabled, Home Assistant automatically discovers the
 1. Make sure the ESP32-C5 is powered on and reporting `802.15.4 started on ch 15 PAN 0x3421`.
 2. Press the pairing/cog button on your SureFlap flap (or power-cycle its batteries if it isn't paired to another hub).
 3. In the bridge log you'll see `beaconreq` → `assoc` → `start` → periodic `online` check-ins every 5.56 seconds.
-4. Once the flap sends its first movement + register frames (or you toggle the dial once), the bridge automatically learns the session keystream and sends `setkey` to the ESP32.
+4. Once the flap sends movement + register frames across two consecutive hours (e.g. via the hourly battery/clock heartbeat), the bridge cross-checks the learned session keystream against the host clock (to prevent a timezone or clock-drift mismatch from flipping lock modes) and automatically sends `setkey` to the ESP32.
+5. After pairing, run `./bridge/flapctl.py synctime` once to keep the flap's internal clock aligned with your host.
 
 ### 4. Add Home Assistant Automations & Dashboard (`homeassistant/`)
 

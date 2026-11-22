@@ -9,8 +9,9 @@ services:
     volumes:
       - ./data:/data
     environment:
-      # Set to your local timezone so auto-learned keystream matches the flap's clock (e.g. Europe/London, America/New_York)
-      - TZ=${TZ:-UTC}
+      # Required: set to your local timezone so auto-learned keystream matches the flap's clock
+      # Example: TZ=Europe/London docker compose up -d  (or set TZ in a .env file)
+      - TZ=${TZ:?Set TZ to your local timezone, e.g. Europe/London}
       - SUREFLAP_CONFIG=/data/config.json
       - STATE_FILE=/data/state.json
       - OTA_DIR=/data/ota
