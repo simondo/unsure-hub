@@ -18,7 +18,7 @@ Responsibilities:
      to forward two-way lock changes to the ESP32 over UDP.
   5. Optional built-in HTTP OTA server (disabled by default; enable in config.json).
 
-Zero third-party dependencies (Python 3.9+ stdlib only).
+Python 3.9+ stdlib only (optional `paho-mqtt` for MQTT Auto-Discovery).
 """
 
 import argparse
@@ -705,7 +705,8 @@ class SureFlapBridge:
             vp = find_fw("ver.txt")
             if vp:
                 try:
-                    return open(vp).read().strip()
+                    with open(vp) as f:
+                        return f.read().strip()
                 except Exception:
                     pass
             return "1.0.0"
@@ -795,7 +796,8 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
                     self.send_response(404)
                     self.end_headers()
                     return
-                data = open(fpath, "rb").read()
+                with open(fpath, "rb") as f:
+                    data = f.read()
                 ctype = "text/plain" if fpath.endswith(".txt") else "application/octet-stream"
                 self._send_bytes(200, ctype, data, delay=0.2 if fpath.endswith(".bin") else 0.0)
 
@@ -814,7 +816,15 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
             def log_message(self, fmt, *args):
                 bridge.log("OTA " + (fmt % args))
 
-        srv = http.server.ThreadingHTTPServer(("0.0.0.0", ota_port), OtaHandler)
+        class FastThreadingHTTPServer(http.server.ThreadingHTTPServer):
+            def server_bind(self):
+                http.server.socketserver.TCPServer.server_bind(self)
+                host, port = self.server_address[:2]
+                self.server_name = host
+                self.server_port = port
+
+        srv = FastThreadingHTTPServer(("0.0.0.0", ota_port), OtaHandler)
+        self.ota_server = srv
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.log(f"Web flasher & OTA HTTP server listening on :{ota_port} (ota={ota_dir}, baked={baked_fw_dir})")
 
