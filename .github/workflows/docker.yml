@@ -31,7 +31,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build universal ESP32-C5 firmware (NVS-configured, zero secrets)
+        shell: bash
         run: |
+          . "$IDF_PATH/export.sh" > /dev/null
           cd firmware
           VER="${GITHUB_REF_NAME}"
           if [ "${GITHUB_REF_TYPE}" != "tag" ]; then VER="1.0.0-${GITHUB_SHA::7}"; fi
