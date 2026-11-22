@@ -31,44 +31,27 @@ No cloud account, no official SureFlap Hub, no TLS hacks, and no subscriptions �
 
 ---
 
-## Quick Start
+## Quick Start (Zero Compiling — 2 Minutes)
 
-### 1. Configure & Flash the ESP32-C5 (`firmware/`)
-
-Requires **ESP-IDF v5.5+** (tested with ESP-IDF v5.5.6):
-
-```bash
-cd firmware
-cp main/secrets.h.example main/secrets.h
-# Edit main/secrets.h with your Wi-Fi SSID/password, bridge host IP (SINK_IP), and EUI-64
-
-idf.py set-target esp32c5
-idf.py build flash monitor
-```
-
-Note the ESP32-C5's IPv4 address from serial output (or assign a DHCP reservation on your router).
-
-### 2. Start the Local Bridge (`bridge/`)
-
-The bridge requires **Python 3.9+** with **zero third-party packages** (or use Docker):
+### 1. Start the Bridge Container (includes 1-Click Web Flasher + Pre-Built Firmware)
 
 ```bash
 cd bridge
-cp config.example.json config.json
-# Edit config.json with your esp32_ip, Home Assistant URL + Long-Lived Access Token, and pet names
-
-python3 -u sureflap_bridge.py -c config.json
-```
-
-Or with Docker Compose:
-
-```bash
-cd bridge
-mkdir -p data
-cp config.example.json data/config.json
-# Edit data/config.json
 docker compose up -d
 ```
+
+Configure either via `data/config.json` (see [`bridge/config.example.json`](bridge/config.example.json)) or pure environment variables in [`bridge/docker-compose.yml`](bridge/docker-compose.yml) (`ESP32_IP`, `MQTT_HOST`, `PETS`).
+
+With **MQTT Auto-Discovery** enabled, Home Assistant automatically discovers the **SureFlap Cat Flap** device (pet sensors, battery, curfew, lock mode selector, and 1-tap Flip buttons) — **no HA token or YAML needed**.
+
+### 2. Flash the ESP32-C5 (1-Click Browser Flasher or `esptool`)
+
+1. Open **`http://<your-server>:8000/`** in Chrome or Edge (use `http://localhost:8000` or HTTPS for Web Serial, or use the `esptool.py` Docker command shown on the page).
+2. Plug any **$7 ESP32-C5** dev board into USB and click **Install SureFlap Hub**.
+3. On first boot, connect your phone/laptop to the open Wi-Fi network **`SureFlap-Hub-Setup`** and open **`http://192.168.4.1/`**.
+4. Enter your **Wi-Fi SSID/password** (5 GHz recommended) and your **Docker bridge server IP**, then click **Save & Reboot**. Settings are saved in NVS flash and survive wireless OTA updates.
+
+> **Building from source (optional):** Run `docker compose --profile build run --rm firmware-builder` (uses `espressif/idf:v5.5.6`, no local ESP-IDF install required) or compile directly with `idf.py set-target esp32c5 && idf.py build` inside `firmware/`.
 
 ### 3. Pair the Cat Flap
 

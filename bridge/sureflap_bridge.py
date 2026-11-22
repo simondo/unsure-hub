@@ -688,33 +688,135 @@ class SureFlapBridge:
 
     def _start_ota_server(self) -> None:
         ota_dir = self.cfg.get("ota_dir", "./ota")
+        baked_fw_dir = self.cfg.get("firmware_dir", "/app/firmware")
         ota_port = int(self.cfg.get("ota_port", 8000))
         os.makedirs(ota_dir, exist_ok=True)
         bridge = self
 
+        def find_fw(name: str) -> Optional[str]:
+            base = os.path.basename(name)
+            for d in (ota_dir, baked_fw_dir):
+                p = os.path.join(d, base)
+                if os.path.isfile(p):
+                    return p
+            return None
+
+        def fw_version() -> str:
+            vp = find_fw("ver.txt")
+            if vp:
+                try:
+                    return open(vp).read().strip()
+                except Exception:
+                    pass
+            return "1.0.0"
+
         class OtaHandler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.0"
 
+            def _send_bytes(self, code: int, ctype: str, body: bytes, delay: float = 0.0):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.flush()
+                if delay > 0:
+                    time.sleep(delay)
+                self.wfile.write(body)
+
             def do_GET(self):
-                fpath = os.path.join(ota_dir, os.path.basename(self.path))
-                if not os.path.isfile(fpath):
+                path = self.path.split("?")[0]
+                if path in ("/", "/index.html"):
+                    ver = fw_version()
+                    has_merged = find_fw("sureflap_hub_merged.bin") is not None
+                    has_ota = (find_fw("sureflap_hub.bin") or find_fw("c5_sniffer.bin")) is not None
+                    pets_html = "".join(
+                        f"<li><b>{p}</b>: {bridge.state.get('location', {}).get(p, 'unknown')}</li>"
+                        for p in bridge.pets.values()
+                    ) or "<li>None configured</li>"
+                    batt = bridge.state.get("battery") or {}
+                    batt_str = f"{batt.get('volts', '?')} V ({batt.get('pct', '?')}%)" if batt else "waiting..."
+                    flash_block = (
+                        "<p>Plug an <b>ESP32-C5</b> into this computer via USB and click install (Chrome/Edge over localhost or HTTPS):</p>"
+                        "<esp-web-install-button manifest='/manifest.json'>"
+                        "<button slot='activate' class='btn green'>Install SureFlap Hub (" + ver + ")</button>"
+                        "</esp-web-install-button>"
+                        "<p class='muted'>On plain HTTP LAN (where browsers block Web Serial), flash via Docker:<br>"
+                        "<code>docker exec -it sureflap-bridge esptool.py --chip esp32c5 write_flash 0x0 /app/firmware/sureflap_hub_merged.bin</code></p>"
+                        if has_merged
+                        else "<p class='muted'>No pre-built merged binary found in <code>/app/firmware</code> or <code>/data/ota</code> yet. Build via <code>docker compose --profile build run --rm firmware-builder</code>.</p>"
+                    )
+                    ota_btn = (
+                        "<form method='POST' action='/api/ota'><button class='btn'>Trigger Wireless OTA on ESP32 (" + bridge.esp_ip + ")</button></form>"
+                        if has_ota
+                        else "<p class='muted'>No OTA binary available.</p>"
+                    )
+                    html = f"""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>SureFlap ESP32-C5 Local Hub</title>
+<script type='module' src='https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module'></script>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;max-width:720px;margin:28px auto;padding:0 16px;line-height:1.5}}
+.card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;margin-bottom:16px}}
+h1,h2{{margin-top:0}} .muted{{color:#9198a1;font-size:13px}}
+code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-break:break-all}}
+.btn{{background:#1f6feb;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer}}
+.btn.green{{background:#238636}} ul{{padding-left:20px}}
+</style></head><body>
+<h1>SureFlap ESP32-C5 Local Hub</h1>
+<div class='card'><h2>Live Status</h2><ul>
+<li><b>ESP32-C5 IP:</b> <code>{bridge.esp_ip}</code> · <b>Session:</b> <code>{bridge.active_hdr or 'learning...'}</code></li>
+<li><b>Lock mode:</b> {bridge.state.get('lock_mode', 'Unknown')} · <b>Curfew:</b> {bridge.state.get('flap_curfew', 'unknown')}</li>
+<li><b>Battery:</b> {batt_str}</li>
+{pets_html}
+</ul></div>
+<div class='card'><h2>1-Click USB Flasher (ESP32-C5)</h2>{flash_block}
+<p class='muted'>After flashing, connect to Wi-Fi AP <b>SureFlap-Hub-Setup</b> and open <code>http://192.168.4.1</code> to enter your Wi-Fi and this server's IP.</p></div>
+<div class='card'><h2>Wireless OTA (version <code>{ver}</code>)</h2>{ota_btn}</div>
+</body></html>"""
+                    self._send_bytes(200, "text/html; charset=utf-8", html.encode())
+                    return
+
+                if path == "/manifest.json":
+                    manifest = {
+                        "name": "SureFlap ESP32-C5 Local Hub",
+                        "version": fw_version(),
+                        "new_install_prompt_erase": True,
+                        "builds": [{
+                            "chipFamily": "ESP32-C5",
+                            "parts": [{"path": "/firmware/sureflap_hub_merged.bin", "offset": 0}],
+                        }],
+                    }
+                    self._send_bytes(200, "application/json", json.dumps(manifest, indent=2).encode())
+                    return
+
+                fpath = find_fw(path)
+                if not fpath:
                     self.send_response(404)
                     self.end_headers()
                     return
                 data = open(fpath, "rb").read()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(data)))
+                ctype = "text/plain" if fpath.endswith(".txt") else "application/octet-stream"
+                self._send_bytes(200, ctype, data, delay=0.2 if fpath.endswith(".bin") else 0.0)
+
+            def do_POST(self):
+                if self.path.split("?")[0] == "/api/ota":
+                    host = self.headers.get("Host", "").split(":")[0] or "127.0.0.1"
+                    fname = "sureflap_hub.bin" if find_fw("sureflap_hub.bin") else "c5_sniffer.bin"
+                    bridge.send_esp(f"ota http://{host}:{ota_port}/{fname}")
+                    self.send_response(303)
+                    self.send_header("Location", "/")
+                    self.end_headers()
+                    return
+                self.send_response(404)
                 self.end_headers()
-                self.wfile.flush()
-                time.sleep(0.2)
-                self.wfile.write(data)
 
             def log_message(self, fmt, *args):
                 bridge.log("OTA " + (fmt % args))
 
         srv = http.server.ThreadingHTTPServer(("0.0.0.0", ota_port), OtaHandler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.log(f"OTA HTTP server listening on :{ota_port} serving {ota_dir}")
+        self.log(f"Web flasher & OTA HTTP server listening on :{ota_port} (ota={ota_dir}, baked={baked_fw_dir})")
 
     def run(self) -> None:
         if self.cfg.get("ota_enabled"):

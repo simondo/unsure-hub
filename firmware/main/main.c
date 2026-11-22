@@ -1,16 +1,19 @@
 // SureFlap Local Hub for ESP32-C5 (ESP-IDF v5.5+)
 //
-// Emulates the IEEE 802.15.4 / MiWi coordinator for a SureFlap Microchip Pet Door /
-// Cat Flap Connect on Channel 15 (PAN 0x3421), streams raw frames as ZEP v2 over UDP
-// (Wireshark-compatible on UDP 17754), sends decoded hub status over UDP 17756, and
-// accepts two-way lock/register commands over UDP 17755:
+// Universal, NVS-configurable IEEE 802.15.4 / MiWi coordinator for SureFlap Microchip
+// Pet Door / Cat Flap Connect on Channel 15 (PAN 0x3421).
+//
+// First boot (empty NVS, no compiled secrets.h):
+//   Starts open Wi-Fi AP "SureFlap-Hub-Setup" -> http://192.168.4.1/ to configure
+//   Wi-Fi SSID/password, bridge server IP, and country code (persisted in NVS across OTAs).
+//
+// Runtime UDP control (port 17755):
 //   setlock <0..4|unlocked|keepin|keepout|locked|curfew> [op_hex] [retries]
 //   writereg <reg_dec> <val_hex_or_dec> [op_hex] [retries]
 //   txraw <hex_payload> [retries]
 //   setkey <hdr4> <k4..k11_16> <chk12_2>
-//   getkey
-//   cancel
-//   lock <ch> | hop [dwell_ms] | kb <i> <v> | ota http://<SINK_IP>:<port>/path
+//   getkey | cancel | sink <ipv4> | wifi <ssid> <pass> | factoryreset
+//   lock <ch> | hop [dwell_ms] | kb <i> <v> | ota http://<sink_ip>:<port>/path
 
 #include <string.h>
 #include <stdlib.h>
@@ -23,7 +26,9 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_ieee802154.h"
 #include "esp_coexist.h"
 #include "esp_system.h"
@@ -32,24 +37,237 @@
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 #include "lwip/sockets.h"
-#include "secrets.h"
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
+#ifndef WIFI5_SSID
+#define WIFI5_SSID ""
+#endif
+#ifndef WIFI5_PASS
+#define WIFI5_PASS ""
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID WIFI5_SSID
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS WIFI5_PASS
+#endif
+#ifndef SINK_IP
+#define SINK_IP ""
+#endif
 #ifndef WIFI_COUNTRY
 #define WIFI_COUNTRY "GB"
 #endif
 #ifndef OTA_PORT
 #define OTA_PORT 8000
 #endif
-#ifndef HUB_EUI64_INIT
-#define HUB_EUI64_INIT { 0x80, 0x1f, 0x12, 0xff, 0xfe, 0x00, 0x01, 0x02 }
-#endif
 
 #define ZEP_PORT   17754
 #define CTRL_PORT  17755
 #define STAT_PORT  17756
 #define HUB_PAN    0x3421
+#define NVS_NS     "sfhub"
 
 static const char *TAG = "sureflap_hub";
+
+typedef struct {
+    char wifi5_ssid[33];
+    char wifi5_pass[65];
+    char wifi2_ssid[33];
+    char wifi2_pass[65];
+    char sink_ip[20];
+    char country[4];
+    uint16_t ota_port;
+    uint8_t hub_mac[8];
+} hub_cfg_t;
+
+static hub_cfg_t g_cfg;
+
+static void cfg_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "w5s", g_cfg.wifi5_ssid);
+    nvs_set_str(h, "w5p", g_cfg.wifi5_pass);
+    nvs_set_str(h, "w2s", g_cfg.wifi2_ssid);
+    nvs_set_str(h, "w2p", g_cfg.wifi2_pass);
+    nvs_set_str(h, "sink", g_cfg.sink_ip);
+    nvs_set_str(h, "cc", g_cfg.country);
+    nvs_set_u16(h, "otap", g_cfg.ota_port);
+    nvs_set_blob(h, "mac", g_cfg.hub_mac, 8);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void cfg_load(void)
+{
+    memset(&g_cfg, 0, sizeof g_cfg);
+    strncpy(g_cfg.wifi5_ssid, WIFI5_SSID, sizeof(g_cfg.wifi5_ssid) - 1);
+    strncpy(g_cfg.wifi5_pass, WIFI5_PASS, sizeof(g_cfg.wifi5_pass) - 1);
+    strncpy(g_cfg.wifi2_ssid, WIFI_SSID, sizeof(g_cfg.wifi2_ssid) - 1);
+    strncpy(g_cfg.wifi2_pass, WIFI_PASS, sizeof(g_cfg.wifi2_pass) - 1);
+    strncpy(g_cfg.sink_ip, SINK_IP, sizeof(g_cfg.sink_ip) - 1);
+    strncpy(g_cfg.country, WIFI_COUNTRY, sizeof(g_cfg.country) - 1);
+    g_cfg.ota_port = OTA_PORT;
+
+#ifdef HUB_EUI64_INIT
+    uint8_t def_mac[8] = HUB_EUI64_INIT;
+    memcpy(g_cfg.hub_mac, def_mac, 8);
+#else
+    uint8_t base_mac[6] = { 0 };
+    esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
+    g_cfg.hub_mac[0] = 0x80; g_cfg.hub_mac[1] = 0x1f; g_cfg.hub_mac[2] = 0x12;
+    g_cfg.hub_mac[3] = 0xff; g_cfg.hub_mac[4] = 0xfe;
+    g_cfg.hub_mac[5] = base_mac[3]; g_cfg.hub_mac[6] = base_mac[4]; g_cfg.hub_mac[7] = base_mac[5];
+#endif
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t l;
+        l = sizeof g_cfg.wifi5_ssid; nvs_get_str(h, "w5s", g_cfg.wifi5_ssid, &l);
+        l = sizeof g_cfg.wifi5_pass; nvs_get_str(h, "w5p", g_cfg.wifi5_pass, &l);
+        l = sizeof g_cfg.wifi2_ssid; nvs_get_str(h, "w2s", g_cfg.wifi2_ssid, &l);
+        l = sizeof g_cfg.wifi2_pass; nvs_get_str(h, "w2p", g_cfg.wifi2_pass, &l);
+        l = sizeof g_cfg.sink_ip;    nvs_get_str(h, "sink", g_cfg.sink_ip, &l);
+        l = sizeof g_cfg.country;    nvs_get_str(h, "cc", g_cfg.country, &l);
+        uint16_t p = 0; if (nvs_get_u16(h, "otap", &p) == ESP_OK && p > 0) g_cfg.ota_port = p;
+        l = 8; nvs_get_blob(h, "mac", g_cfg.hub_mac, &l);
+        nvs_close(h);
+    }
+    if (!g_cfg.wifi2_ssid[0]) {
+        strncpy(g_cfg.wifi2_ssid, g_cfg.wifi5_ssid, sizeof(g_cfg.wifi2_ssid) - 1);
+        strncpy(g_cfg.wifi2_pass, g_cfg.wifi5_pass, sizeof(g_cfg.wifi2_pass) - 1);
+    }
+    if (!g_cfg.country[0]) strncpy(g_cfg.country, "GB", sizeof(g_cfg.country) - 1);
+    if (!g_cfg.ota_port) g_cfg.ota_port = 8000;
+}
+
+static bool cfg_is_ready(void)
+{
+    return g_cfg.wifi5_ssid[0] != '\0' && g_cfg.sink_ip[0] != '\0';
+}
+
+static void url_decode(const char *src, char *dst, size_t max_len)
+{
+    size_t i = 0;
+    while (*src && i + 1 < max_len) {
+        if (*src == '+') { dst[i++] = ' '; src++; }
+        else if (*src == '%' && isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2])) {
+            int hi = isdigit((unsigned char)src[1]) ? src[1] - '0' : tolower((unsigned char)src[1]) - 'a' + 10;
+            int lo = isdigit((unsigned char)src[2]) ? src[2] - '0' : tolower((unsigned char)src[2]) - 'a' + 10;
+            dst[i++] = (char)((hi << 4) | lo);
+            src += 3;
+        } else { dst[i++] = *src++; }
+    }
+    dst[i] = '\0';
+}
+
+static bool form_get(const char *body, const char *key, char *out, size_t max_len)
+{
+    size_t klen = strlen(key);
+    const char *p = body;
+    while (p && *p) {
+        if (!strncmp(p, key, klen) && p[klen] == '=') {
+            const char *v = p + klen + 1;
+            const char *amp = strchr(v, '&');
+            size_t vlen = amp ? (size_t)(amp - v) : strlen(v);
+            char tmp[192];
+            if (vlen >= sizeof tmp) vlen = sizeof(tmp) - 1;
+            memcpy(tmp, v, vlen); tmp[vlen] = '\0';
+            url_decode(tmp, out, max_len);
+            return true;
+        }
+        p = strchr(p, '&');
+        if (p) p++;
+    }
+    return false;
+}
+
+static void run_setup_portal(void)
+{
+    ESP_LOGW(TAG, "No Wi-Fi/bridge config found — starting SoftAP 'SureFlap-Hub-Setup' on http://192.168.4.1/");
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_ap();
+    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
+    wifi_config_t ap = { 0 };
+    strcpy((char *)ap.ap.ssid, "SureFlap-Hub-Setup");
+    ap.ap.ssid_len = strlen("SureFlap-Hub-Setup");
+    ap.ap.channel = 6;
+    ap.ap.max_connection = 4;
+    ap.ap.authmode = WIFI_AUTH_OPEN;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80), .sin_addr.s_addr = htonl(INADDR_ANY) };
+    bind(srv, (struct sockaddr *)&a, sizeof a);
+    listen(srv, 4);
+
+    static const char *HTML_PAGE =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
+        "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>SureFlap ESP32-C5 Setup</title><style>"
+        "body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;max-width:420px;margin:24px auto;padding:16px}"
+        "input,button{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 14px;border-radius:8px;border:1px solid #30363d;background:#161b22;color:#e6edf3;font-size:15px}"
+        "button{background:#238636;border:none;font-weight:600;cursor:pointer}"
+        "label{font-size:13px;color:#9198a1}h2{margin-top:0}"
+        "</style></head><body><h2>SureFlap ESP32-C5 Hub Setup</h2>"
+        "<form method=POST action=/save>"
+        "<label>Primary Wi-Fi SSID (5 GHz recommended)</label><input name=w5s required>"
+        "<label>Primary Wi-Fi Password</label><input name=w5p type=password>"
+        "<label>2.4 GHz Fallback SSID (optional)</label><input name=w2s>"
+        "<label>2.4 GHz Fallback Password (optional)</label><input name=w2p type=password>"
+        "<label>Bridge / Docker Server IP (e.g. 192.168.1.50)</label><input name=sink required>"
+        "<label>Wi-Fi Country Code</label><input name=cc value=GB maxlength=2>"
+        "<button type=submit>Save &amp; Reboot</button></form></body></html>";
+
+    static char req[1536];
+    for (;;) {
+        int c = accept(srv, NULL, NULL);
+        if (c < 0) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+        struct timeval tv = { .tv_sec = 3 };
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        int n = recv(c, req, sizeof(req) - 1, 0);
+        if (n > 0) {
+            req[n] = '\0';
+            if (!strncmp(req, "POST /save", 10)) {
+                char *body = strstr(req, "\r\n\r\n");
+                if (body) {
+                    body += 4;
+                    form_get(body, "w5s", g_cfg.wifi5_ssid, sizeof g_cfg.wifi5_ssid);
+                    form_get(body, "w5p", g_cfg.wifi5_pass, sizeof g_cfg.wifi5_pass);
+                    form_get(body, "w2s", g_cfg.wifi2_ssid, sizeof g_cfg.wifi2_ssid);
+                    form_get(body, "w2p", g_cfg.wifi2_pass, sizeof g_cfg.wifi2_pass);
+                    form_get(body, "sink", g_cfg.sink_ip, sizeof g_cfg.sink_ip);
+                    form_get(body, "cc", g_cfg.country, sizeof g_cfg.country);
+                    if (!g_cfg.wifi2_ssid[0]) {
+                        strncpy(g_cfg.wifi2_ssid, g_cfg.wifi5_ssid, sizeof(g_cfg.wifi2_ssid) - 1);
+                        strncpy(g_cfg.wifi2_pass, g_cfg.wifi5_pass, sizeof(g_cfg.wifi2_pass) - 1);
+                    }
+                    if (cfg_is_ready()) {
+                        cfg_save();
+                        const char *ok = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                                         "<html><body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:24px'>"
+                                         "<h2>Saved!</h2><p>Rebooting into SureFlap Hub mode...</p></body></html>";
+                        send(c, ok, strlen(ok), 0);
+                        close(c);
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        esp_restart();
+                    }
+                }
+            }
+            send(c, HTML_PAGE, strlen(HTML_PAGE), 0);
+        }
+        close(c);
+    }
+}
 
 typedef struct {
     uint8_t len;
@@ -75,7 +293,7 @@ static RTC_NOINIT_ATTR volatile uint8_t disc_last, disc_cnt;
 static uint8_t prev_disc[2];
 static uint32_t zseq;
 
-static uint8_t hub_mac[8] = HUB_EUI64_INIT;
+static uint8_t hub_mac[8] = { 0x80, 0x1f, 0x12, 0xff, 0xfe, 0x00, 0x01, 0x02 };
 static volatile bool r154_started, radio_paused;
 static void hub_log_str(const char *ev, const char *t);
 
@@ -296,12 +514,12 @@ static void wifi_start(void)
     esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_country_code(WIFI_COUNTRY, true));
+    ESP_ERROR_CHECK(esp_wifi_set_country_code(g_cfg.country, true));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_ev, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_ev, NULL));
     wifi_config_t wc = { 0 };
-    strncpy((char *)wc.sta.ssid, use5g ? WIFI5_SSID : WIFI_SSID, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, use5g ? WIFI5_PASS : WIFI_PASS, sizeof(wc.sta.password) - 1);
+    strncpy((char *)wc.sta.ssid, use5g ? g_cfg.wifi5_ssid : g_cfg.wifi2_ssid, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, use5g ? g_cfg.wifi5_pass : g_cfg.wifi2_pass, sizeof(wc.sta.password) - 1);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
@@ -557,13 +775,21 @@ static void hub_handle(const rxf_t *r)
     }
 }
 
+static struct sockaddr_in zep_to;
+
+static void update_sink_addrs(void)
+{
+    zep_to.sin_family = AF_INET;
+    zep_to.sin_port = htons(ZEP_PORT);
+    inet_pton(AF_INET, g_cfg.sink_ip, &zep_to.sin_addr);
+    stat_to = zep_to;
+    stat_to.sin_port = htons(STAT_PORT);
+}
+
 static void send_task(void *a)
 {
     int s = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(ZEP_PORT) };
-    inet_pton(AF_INET, SINK_IP, &to.sin_addr);
-    stat_to = to;
-    stat_to.sin_port = htons(STAT_PORT);
+    update_sink_addrs();
     stat_sock = s;
 
     rxf_t f;
@@ -596,7 +822,7 @@ static void send_task(void *a)
         pkt[31] = f.len;
         memcpy(pkt + 32, f.d, f.len);
         crumb[0] = 4;
-        sendto(s, pkt, 32 + f.len, MSG_DONTWAIT, (struct sockaddr *)&to, sizeof(to));
+        sendto(s, pkt, 32 + f.len, MSG_DONTWAIT, (struct sockaddr *)&zep_to, sizeof(zep_to));
         crumb[0] = 5;
     }
 }
@@ -689,13 +915,13 @@ static void ota_task(void *a)
 static void boot_ota_check(void)
 {
     char v[32] = "";
-    int n = http_get(SINK_IP, OTA_PORT, "/ver.txt", ver_cb, v);
+    int n = http_get(g_cfg.sink_ip, g_cfg.ota_port, "/ver.txt", ver_cb, v);
     while (n > 0 && strlen(v) > 0 && (v[strlen(v) - 1] == '\n' || v[strlen(v) - 1] == '\r' || v[strlen(v) - 1] == ' ')) {
         v[strlen(v) - 1] = 0;
     }
     const char *mine = esp_app_get_description()->version;
     hub_log_str(n > 0 ? (strcmp(v, mine) ? "ota-newer " : "ota-current ") : "ota-nocontact ", mine);
-    if (n > 0 && strcmp(v, mine)) ota_pull(SINK_IP, OTA_PORT, "/sureflap_hub.bin");
+    if (n > 0 && strcmp(v, mine)) ota_pull(g_cfg.sink_ip, g_cfg.ota_port, "/sureflap_hub.bin");
 }
 
 static void ctrl_task(void *a)
@@ -705,8 +931,6 @@ static void ctrl_task(void *a)
     bind(s, (struct sockaddr *)&me, sizeof me);
     struct timeval tv = { .tv_sec = 10 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    struct sockaddr_in sink = { .sin_family = AF_INET, .sin_port = htons(STAT_PORT) };
-    inet_pton(AF_INET, SINK_IP, &sink.sin_addr);
 
     char b[200];
     for (;;) {
@@ -796,13 +1020,48 @@ static void ctrl_task(void *a)
                 cmd_waiting_ack = false;
                 taskEXIT_CRITICAL(&cmd_mux);
                 hub_log_str("cmd ", "cancelled");
-            } else if (!strncmp(b, "ota http://" SINK_IP ":", 11 + sizeof(SINK_IP))) {
-                xTaskCreate(ota_task, "ota", 8192, strdup(b + 4), 5, NULL);
+            } else if (!strncmp(b, "sink ", 5)) {
+                char ip[20] = "";
+                struct in_addr tmp;
+                if (sscanf(b + 5, "%19s", ip) == 1 && inet_pton(AF_INET, ip, &tmp) == 1) {
+                    strncpy(g_cfg.sink_ip, ip, sizeof(g_cfg.sink_ip) - 1);
+                    cfg_save();
+                    update_sink_addrs();
+                    hub_log_str("sink ", g_cfg.sink_ip);
+                }
+            } else if (!strncmp(b, "wifi ", 5)) {
+                char ssid[33] = "", pass[65] = "";
+                if (sscanf(b + 5, "%32s %64s", ssid, pass) >= 1) {
+                    strncpy(g_cfg.wifi5_ssid, ssid, sizeof(g_cfg.wifi5_ssid) - 1);
+                    strncpy(g_cfg.wifi5_pass, pass, sizeof(g_cfg.wifi5_pass) - 1);
+                    strncpy(g_cfg.wifi2_ssid, ssid, sizeof(g_cfg.wifi2_ssid) - 1);
+                    strncpy(g_cfg.wifi2_pass, pass, sizeof(g_cfg.wifi2_pass) - 1);
+                    cfg_save();
+                    hub_log_str("wifi-saved ", g_cfg.wifi5_ssid);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    esp_restart();
+                }
+            } else if (!strcmp(b, "factoryreset")) {
+                nvs_handle_t nh;
+                if (nvs_open(NVS_NS, NVS_READWRITE, &nh) == ESP_OK) {
+                    nvs_erase_all(nh);
+                    nvs_commit(nh);
+                    nvs_close(nh);
+                }
+                hub_log_str("cfg ", "erased-rebooting");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_restart();
+            } else if (!strncmp(b, "ota http://", 11)) {
+                char expected[48];
+                snprintf(expected, sizeof expected, "ota http://%s:", g_cfg.sink_ip);
+                if (!strncmp(b, expected, strlen(expected))) {
+                    xTaskCreate(ota_task, "ota", 8192, strdup(b + 4), 5, NULL);
+                }
             }
         }
         hb++;
         crumb[1] = 3;
-        if (wifi_up) stat_msg(s, &sink);
+        if (wifi_up) stat_msg(s, &stat_to);
         crumb[1] = 4;
     }
 }
@@ -871,8 +1130,19 @@ void app_main(void)
     memset((void *)crumb, 0, 4);
     if (esp_reset_reason() != ESP_RST_SW) memset(prev_crumb, 0, 4);
 
-    nvs_flash_erase();
-    ESP_ERROR_CHECK(nvs_flash_init());
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    cfg_load();
+    memcpy(hub_mac, g_cfg.hub_mac, 8);
+    if (!cfg_is_ready()) {
+        run_setup_portal();
+    }
+
     q = xQueueCreate(64, sizeof(rxf_t));
     wifi_start();
     xTaskCreate(send_task, "send", 8192, NULL, 6, NULL);

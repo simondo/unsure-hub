@@ -1,0 +1,2 @@
+# Populated automatically by GitHub Actions (sureflap_hub.bin, sureflap_hub_merged.bin, ver.txt)
+# or locally via: docker compose --profile build run --rm firmware-builder

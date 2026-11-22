@@ -21,3 +21,13 @@ services:
       # - CURFEW_LOCK=18:30
       # - CURFEW_UNLOCK=06:00
       # - OTA_ENABLED=true
+
+  # Optional on-demand ESP-IDF v5.5.6 builder (only needed if you edit firmware/main/main.c):
+  #   docker compose --profile build run --rm firmware-builder
+  firmware-builder:
+    profiles: ["build"]
+    build:
+      context: ../firmware
+      dockerfile: Dockerfile.builder
+    volumes:
+      - ./data/ota:/output

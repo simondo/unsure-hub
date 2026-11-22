@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-RUN pip install --no-cache-dir paho-mqtt
+RUN pip install --no-cache-dir paho-mqtt esptool
 COPY sureflap_bridge.py flapctl.py ./
+# Optional pre-built ESP32-C5 firmware (populated automatically by CI or local builder)
+COPY firmware/ /app/firmware/
 RUN chmod +x sureflap_bridge.py flapctl.py
 
 ENV SUREFLAP_CONFIG=/data/config.json
