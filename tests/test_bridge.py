@@ -345,6 +345,39 @@ class TestProtocolDecoding(BridgeTestBase):
         bridge.handle_stat_line("txcmd-ack ok")
         self.assertEqual(bridge.cmd_status, "acked")
 
+    def test_failed_lock_command_on_esp_error_and_timeout(self):
+        bridge = self.make_bridge(extra_cfg={"cmd_timeout_sec": 10.0})
+        bridge.state["lock_mode"] = "Curfew"
+        published = []
+        mock_mqtt = MagicMock()
+        mock_mqtt.publish.side_effect = lambda topic, data, qos=1, retain=True: published.append((topic, data, retain))
+        bridge.mqtt_client = mock_mqtt
+
+        # 1) ESP32 reports cmd-err -> marks failed, emits command_failed event, snaps lock_mode back to Curfew
+        bridge._set_lock_from_ha("Keep In")
+        self.assertEqual(bridge.cmd_status, "sending Keep In")
+        bridge.handle_stat_line("HUB cmd-err session key not set yet")
+        self.assertTrue(bridge.cmd_status.startswith("failed:"))
+        self.assertIsNone(bridge.pending_cmd_target)
+        fail_topics = [t for t, _, _ in published if t.endswith("/command_failed")]
+        self.assertEqual(len(fail_topics), 1)
+        # Re-published confirmed lock state ("Curfew") so HA select snaps back
+        self.assertIn(("sureflap/lock_mode/state", "Curfew", True), published)
+
+        # 2) No confirmation within cmd_timeout_sec -> check_cmd_timeout() reports failure
+        published.clear()
+        with patch("sureflap_bridge.time.time", return_value=1000.0):
+            bridge._set_lock_from_ha("Unlocked")
+        with patch("sureflap_bridge.time.time", return_value=1005.0):
+            bridge.check_cmd_timeout()
+        self.assertEqual(bridge.cmd_status, "sending Unlocked")
+        with patch("sureflap_bridge.time.time", return_value=1011.0):
+            bridge.check_cmd_timeout()
+        self.assertIn("failed: timeout", bridge.cmd_status)
+        self.assertIsNone(bridge.pending_cmd_target)
+        self.assertTrue(any(t.endswith("/command_failed") for t, _, _ in published))
+        self.assertIn(("sureflap/lock_mode/state", "Curfew", True), published)
+
 
 class TestPetStateMachine(BridgeTestBase):
     def _send_pet_event(self, bridge, t_str, slot, dir_byte, now_ts):

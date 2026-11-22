@@ -112,6 +112,9 @@ class SureFlapBridge:
         self.last_flip_ts: Dict[str, str] = {}
         self.pending_unknown_exits: int = 0
         self.cmd_status = "idle"
+        self.pending_cmd_target: Optional[str] = None
+        self.pending_cmd_deadline: float = 0.0
+        self.cmd_timeout_sec: float = float(cfg.get("cmd_timeout_sec", 30.0))
 
         self.udp_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.log_fp = open(self.log_path, "a", buffering=1) if self.log_path else None
@@ -325,11 +328,43 @@ class SureFlapBridge:
         self.log(f"MANUAL FLIP: {pet} -> {new_loc}")
         self._push_pet(pet, new_loc, t, inferred=False)
 
+    def _fail_lock_cmd(self, reason: str, target: Optional[str] = None) -> None:
+        tgt = target or self.pending_cmd_target or "unknown"
+        self.pending_cmd_target = None
+        self.pending_cmd_deadline = 0.0
+        self.cmd_status = f"failed: {reason}"
+        actual = self.state.get("lock_mode", "Unknown")
+        self.log(f"LOCK COMMAND FAILED ({tgt}): {reason} — flap remains {actual}")
+        ev = {
+            "target": tgt,
+            "reason": reason,
+            "actual_lock_mode": actual,
+            "time": time.strftime("%H:%M:%S"),
+        }
+        self._mqtt_pub("command_failed", ev, retain=False)
+        self.ha_post("/api/events/catflap_command_failed", ev)
+        self.push_lock_sensor()
+        if actual in LOCK_MODES.values():
+            self.sync_ha_select(actual)
+
+    def check_cmd_timeout(self) -> None:
+        if self.pending_cmd_target and time.time() >= self.pending_cmd_deadline:
+            self._fail_lock_cmd(f"timeout waiting for flap ({self.pending_cmd_target})")
+
     def _set_lock_from_ha(self, val: str) -> None:
         code = LOCK_BY_NAME.get(val.strip().lower())
         if code is None:
             return
-        self.cmd_status = f"sending {LOCK_MODES[code]}"
+        target = LOCK_MODES[code]
+        if not self.esp_ip:
+            self._fail_lock_cmd("ESP32 not connected", target=target)
+            return
+        if self.active_hdr and not self.key_verified.get(self.active_hdr) and not self.allow_unverified_key:
+            self._fail_lock_cmd("session key not verified yet", target=target)
+            return
+        self.pending_cmd_target = target
+        self.pending_cmd_deadline = time.time() + self.cmd_timeout_sec
+        self.cmd_status = f"sending {target}"
         self.send_esp(f"setlock {code}")
         self.push_lock_sensor()
 
@@ -503,11 +538,7 @@ class SureFlapBridge:
                 self.last_ha_lock = val
             elif val != self.last_ha_lock:
                 self.last_ha_lock = val
-                code = LOCK_BY_NAME.get(val.lower())
-                if code is not None:
-                    self.cmd_status = f"sending {val}"
-                    self.send_esp(f"setlock {code}")
-                    self.push_lock_sensor()
+                self._set_lock_from_ha(val)
 
         # Optional 1-tap manual flip buttons (input_button.catflap_flip_<pet>)
         for pet in self.pets.values():
@@ -663,6 +694,10 @@ class SureFlapBridge:
 
     def handle_stat_line(self, line: str) -> None:
         self.log(line)
+        if "cmd-err " in line:
+            err = line.split("cmd-err ", 1)[1].strip() or "esp32 error"
+            self._fail_lock_cmd(err)
+            return
         if "txcmd-ack" in line:
             self.cmd_status = "acked"
             self.push_lock_sensor()
@@ -709,6 +744,8 @@ class SureFlapBridge:
             if code in LOCK_MODES:
                 mode = LOCK_MODES[code]
                 self.state["lock_mode"] = mode
+                self.pending_cmd_target = None
+                self.pending_cmd_deadline = 0.0
                 self.cmd_status = "confirmed"
                 self._save_state()
                 self.log(f"LOCK MODE -> {mode} (code {code})")
@@ -994,6 +1031,7 @@ code{{background:#0d1117;padding:2px 6px;border-radius:6px;font-size:12px;word-b
             now = time.time()
             if now - last_poll >= self.ha_poll_sec:
                 last_poll = now
+                self.check_cmd_timeout()
                 self.poll_ha_lock()
             if now - last_push >= 300.0:
                 last_push = now
